@@ -8,15 +8,22 @@
       check   Confere ferramentas, configuração, rede e tradução de IPs.
       image   Constrói a imagem golden RHEL 10 com o Packer (uma vez).
       up         Cria (clones vinculados da golden), liga e provisiona as
-                 3 VMs do lab. -NoProvision: só a infraestrutura.
-      provision  Roda (de novo) o provisionamento Ansible nas VMs ligadas.
+                 3 VMs do lab e tira o snapshot 'pronto'. Se o lab já
+                 existe e já foi provisionado, só liga as VMs.
+                 -NoProvision: só a infraestrutura.
+      provision  Roda (de novo) o provisionamento Ansible e refaz o snapshot.
+      stop       Desliga as 3 VMs, mantendo tudo (exercícios em andamento).
+      start      Liga as 3 VMs de novo, do ponto em que pararam.
+      snapshot   Desliga as VMs e (re)tira o snapshot 'pronto' do estado atual.
+      reset      Volta as 3 VMs ao snapshot 'pronto' (descarta o que mudou).
       down       Desregistra da Red Hat, desliga e apaga as 3 VMs do lab
                  (a golden não é tocada).
-      status  Mostra o estado das VMs do lab.
-      ssh     Abre SSH como student numa VM: lab.ps1 ssh servera
-      help    Mostra esta ajuda.
+      status     Estado das VMs, snapshot e provisionamento.
+      ssh        Abre SSH como student numa VM: lab.ps1 ssh servera
+      help       Mostra esta ajuda.
 
-    Próxima fase: snapshot e reset.
+    Rode tudo numa sessão NORMAL do PowerShell 7 (sem administrador).
+    Só o setup-host.ps1 precisa de administrador.
 
 .EXAMPLE
     .\vmware\lab.ps1 check
@@ -32,7 +39,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('check', 'image', 'up', 'provision', 'down', 'status', 'ssh', 'help')]
+    [ValidateSet('check', 'image', 'up', 'provision', 'stop', 'start', 'snapshot', 'reset', 'down', 'status', 'ssh', 'help')]
     [string]$Command = 'help',
 
     # ssh: nome da VM (workstation, servera, serverb).
@@ -40,7 +47,7 @@ param(
     [string]$Name,
 
     # image: reconstrói a golden mesmo se já existir.
-    # down: não pede confirmação.
+    # down, reset: não pedem confirmação.
     [switch]$Force,
 
     # up: liga as VMs com janela no VMware Workstation (padrão: em segundo plano).
@@ -302,6 +309,8 @@ function Invoke-Up {
     $snaps = Invoke-Vmrun $s @('listSnapshots', $golden)
     if (-not ($snaps -match '^\s*base\s*$')) { throw "A golden não tem o snapshot 'base'. Rode: .\vmware\lab.ps1 image -Force" }
     $key = Initialize-StudentKey
+    $marker = Get-ProvisionMarker $s
+    $created = $false
 
     foreach ($vmName in $m.machines.Keys) {
         $spec = $m.machines[$vmName]
@@ -314,6 +323,7 @@ function Invoke-Up {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $vmx) | Out-Null
             Invoke-Vmrun $s @('clone', $golden, $vmx, 'linked', '-snapshot=base', "-cloneName=rhcsa-lab-$vmName") | Out-Null
             Set-LabVmConfig -Settings $s -VmName $vmName -Spec $spec -Vmx $vmx -IsController ($vmName -eq $m.classroom.host)
+            $created = $true
             Write-Ok ("{0,-12} {1} vCPU, {2} MiB, {3} NIC(s), IP {4}" -f $vmName, $spec.cpus, $spec.memory_mb, @($spec.nics).Count, $spec.ip)
         }
 
@@ -331,6 +341,9 @@ function Invoke-Up {
         Wait-LabSsh $vmName $spec.ip
         Write-Ok "$vmName ($($spec.ip)) responde SSH"
     }
+
+    # VM nova = lab ainda não provisionado, mesmo que sobre um marcador antigo.
+    if ($created) { Remove-Item -Force $marker -ErrorAction SilentlyContinue }
 
     Write-Step 'Conferindo NICs e discos dentro das VMs'
     $problems = 0
@@ -364,7 +377,124 @@ function Invoke-Up {
         Write-Host 'Provisionamento pulado (-NoProvision). Quando quiser: .\vmware\lab.ps1 provision'
         return
     }
+    if (Test-Path $marker) {
+        Write-Host "Lab já provisionado em $((Get-Content $marker -Raw).Trim()); só liguei as VMs."
+        Write-Host '  Para voltar ao estado limpo: .\vmware\lab.ps1 reset'
+        Write-Host '  Para rodar o Ansible de novo: .\vmware\lab.ps1 provision'
+        return
+    }
     Invoke-Provision
+}
+
+# ------------------------------------------------- ciclo de vida do lab ---
+$script:SnapshotName = 'pronto'
+
+function Get-ProvisionMarker([hashtable]$Settings) { Join-Path $Settings.LabDir '.provisionado' }
+
+# VMs do lab que existem em disco, na ordem de machines.yaml.
+function Get-ExistingLabVms([hashtable]$Settings, $Machines, [switch]$RequireAll) {
+    $list = foreach ($vmName in $Machines.machines.Keys) {
+        $vmx = Get-LabVmx $Settings $vmName
+        if (Test-Path $vmx) { [pscustomobject]@{ Name = $vmName; Vmx = $vmx; Ip = $Machines.machines[$vmName].ip } }
+        elseif ($RequireAll) { throw "$vmName não existe. Rode: .\vmware\lab.ps1 up" }
+    }
+    return @($list)
+}
+
+function Test-LabSnapshot([hashtable]$Settings, [string]$Vmx) {
+    $snaps = Invoke-Vmrun $Settings @('listSnapshots', $Vmx) -AllowFailure
+    return [bool]($snaps -match "^\s*$($script:SnapshotName)\s*$")
+}
+
+function Start-LabVms([hashtable]$Settings, $Vms) {
+    foreach ($v in $Vms) {
+        if (Test-VmRunning $Settings $v.Vmx) { Write-Ok "$($v.Name) já está ligada"; continue }
+        Invoke-Vmrun $Settings @('start', $v.Vmx, ($(if ($Gui) { 'gui' } else { 'nogui' }))) | Out-Null
+        Write-Ok "$($v.Name) ligada"
+    }
+    Write-Step 'Aguardando SSH'
+    foreach ($v in $Vms) { Wait-LabSsh $v.Name $v.Ip; Write-Ok "$($v.Name) ($($v.Ip)) responde SSH" }
+}
+
+function Stop-LabVms([hashtable]$Settings, $Vms, [switch]$Hard) {
+    foreach ($v in $Vms) {
+        if (-not (Test-VmRunning $Settings $v.Vmx)) { Write-Ok "$($v.Name) já está desligada"; continue }
+        if ($Hard) { Invoke-Vmrun $Settings @('stop', $v.Vmx, 'hard') -AllowFailure | Out-Null }
+        else { Stop-LabVm $Settings $v.Vmx }
+        Write-Ok "$($v.Name) desligada"
+    }
+}
+
+function Invoke-Stop {
+    $s = Get-LabSettings
+    $vms = Get-ExistingLabVms $s (Get-LabMachines)
+    if ($vms.Count -eq 0) { Write-Host 'Nenhuma VM do lab criada.'; return }
+    Write-Step 'Desligando o lab (desligamento limpo; nada é perdido)'
+    Stop-LabVms $s $vms
+    Write-Host 'Lab desligado. Para continuar de onde parou: .\vmware\lab.ps1 start' -ForegroundColor Green
+}
+
+function Invoke-Start {
+    $s = Get-LabSettings
+    $vms = Get-ExistingLabVms $s (Get-LabMachines) -RequireAll
+    Write-Step 'Ligando o lab'
+    Start-LabVms $s $vms
+    Write-Host 'Lab no ar. .\vmware\lab.ps1 ssh workstation' -ForegroundColor Green
+}
+
+# Snapshot com as VMs DESLIGADAS: estado de disco consistente, sem memória
+# (menor, e sem o relógio "congelado" que um snapshot de VM ligada traria
+# de volta no reset).
+function Invoke-Snapshot([switch]$Quiet) {
+    $s = Get-LabSettings
+    $m = Get-LabMachines
+    $vms = Get-ExistingLabVms $s $m -RequireAll
+    Write-Step "Snapshot '$($script:SnapshotName)' das 3 VMs (desliga, fotografa e religa)"
+    Stop-LabVms $s $vms
+    foreach ($v in $vms) {
+        if ($v.Name -eq $m.classroom.host) {
+            # Sem ISO no CD no estado salvo, como no homelab. (O provision
+            # reconecta a ISO sozinho quando precisa dela.)
+            $cfg = Read-Vmx $v.Vmx
+            [void](Set-VmxCdrom $cfg '')
+            Write-Vmx $v.Vmx $cfg
+        }
+        if (Test-LabSnapshot $s $v.Vmx) {
+            Invoke-Vmrun $s @('deleteSnapshot', $v.Vmx, $script:SnapshotName) | Out-Null
+        }
+        Invoke-Vmrun $s @('snapshot', $v.Vmx, $script:SnapshotName) | Out-Null
+        Write-Ok "$($v.Name): snapshot '$($script:SnapshotName)'"
+    }
+    Start-LabVms $s $vms
+    if (-not $Quiet) {
+        Write-Host "Snapshot salvo. .\vmware\lab.ps1 reset volta a este ponto." -ForegroundColor Green
+    }
+}
+
+function Invoke-Reset {
+    $s = Get-LabSettings
+    $vms = Get-ExistingLabVms $s (Get-LabMachines) -RequireAll
+    foreach ($v in $vms) {
+        if (-not (Test-LabSnapshot $s $v.Vmx)) {
+            throw "$($v.Name) não tem o snapshot '$($script:SnapshotName)'. Rode: .\vmware\lab.ps1 snapshot (ou provision)"
+        }
+    }
+    if (-not $Force) {
+        Write-Host "Reset: as 3 VMs voltam ao snapshot '$($script:SnapshotName)'. Tudo o que foi feito depois dele"
+        Write-Host 'é DESCARTADO, inclusive o histórico do dashboard e exercícios em andamento.'
+        $ans = Read-Host 'Confirma? Digite "sim"'
+        if ($ans -ne 'sim') { Write-Host 'Cancelado.'; return }
+    }
+    Write-Step 'Desligando (o estado atual vai ser descartado)'
+    Stop-LabVms $s $vms -Hard
+    Write-Step "Voltando ao snapshot '$($script:SnapshotName)'"
+    foreach ($v in $vms) {
+        Invoke-Vmrun $s @('revertToSnapshot', $v.Vmx, $script:SnapshotName) | Out-Null
+        Write-Ok $v.Name
+    }
+    Write-Step 'Ligando'
+    Start-LabVms $s $vms
+    Write-Host 'Lab de volta ao estado limpo.' -ForegroundColor Green
 }
 
 # -------------------------------------------------------------- provision ---
@@ -524,8 +654,13 @@ function Invoke-Provision {
         $h = Invoke-LabSsh $m.machines[$vmName].ip 'hostname'
         Write-Ok ("{0,-12} {1}  ({2})" -f $vmName, ($h.Output -join ''), $m.machines[$vmName].ip)
     }
+    Set-Content -Path (Get-ProvisionMarker $s) -Value (Get-Date -Format 'yyyy-MM-dd HH:mm') -Encoding utf8NoBOM
+
+    # Estado limpo recém-provisionado: base do `reset`.
+    Invoke-Snapshot -Quiet
+
     Write-Host ''
-    Write-Host 'Lab provisionado.' -ForegroundColor Green
+    Write-Host "Lab provisionado, com snapshot '$($script:SnapshotName)' para o reset." -ForegroundColor Green
     Write-Host "  Dashboard: http://${ctlIp}:$($m.dashboard.port)"
     Write-Host '  Estudar:   .\vmware\lab.ps1 ssh workstation   e depois:  lab list'
 }
@@ -571,6 +706,7 @@ function Invoke-Down {
         }
     }
     Remove-Item -Force (Join-Path $paths.Work 'known_hosts') -ErrorAction SilentlyContinue
+    Remove-Item -Force (Get-ProvisionMarker $s) -ErrorAction SilentlyContinue
     Write-Host 'Lab removido. A imagem golden continua intacta.' -ForegroundColor Green
 }
 
@@ -583,9 +719,12 @@ function Invoke-Status {
         $vmx = Get-LabVmx $s $vmName
         $state = if (-not (Test-Path $vmx)) { 'não criada' } elseif (Test-VmRunning $s $vmx) { 'ligada' } else { 'desligada' }
         $ssh = if ($state -eq 'ligada' -and (Test-TcpPort $spec.ip 22)) { 'ok' } else { '-' }
-        [pscustomobject]@{ VM = $vmName; IP = $spec.ip; Estado = $state; SSH = $ssh }
+        $snap = if ((Test-Path $vmx) -and (Test-LabSnapshot $s $vmx)) { $script:SnapshotName } else { '-' }
+        [pscustomobject]@{ VM = $vmName; IP = $spec.ip; Estado = $state; SSH = $ssh; Snapshot = $snap }
     }
     $rows | Format-Table -AutoSize
+    $marker = Get-ProvisionMarker $s
+    Write-Host ("Provisionado: {0}" -f $(if (Test-Path $marker) { (Get-Content $marker -Raw).Trim() } else { 'não' }))
     $golden = Get-GoldenVmx $s $m.image
     Write-Host ("Golden: {0}" -f $(if (Test-Path $golden) { $golden } else { 'não construída' }))
 }
@@ -612,6 +751,10 @@ switch ($Command) {
     'image'  { Invoke-Image }
     'up'     { Invoke-Up }
     'provision' { Invoke-Provision }
+    'stop'     { Invoke-Stop }
+    'start'    { Invoke-Start }
+    'snapshot' { Invoke-Snapshot }
+    'reset'    { Invoke-Reset }
     'down'   { Invoke-Down }
     'status' { Invoke-Status }
     'ssh'    { Invoke-Ssh }

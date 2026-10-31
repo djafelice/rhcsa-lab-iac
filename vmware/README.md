@@ -18,7 +18,7 @@ infraestrutura mudam.
 - [x] **Fase 1**: configuração, tradução de IPs, imagem golden
 - [x] **Fase 2**: `up` / `down` / `status` / `ssh` da infraestrutura (clones vinculados)
 - [x] **Fase 3**: provisionamento com o Ansible original (workstation como controladora)
-- [ ] Fase 4: snapshot e reset
+- [x] **Fase 4**: `stop` / `start`, `snapshot` / `reset`
 
 ## Requisitos
 
@@ -159,6 +159,28 @@ desligados (lockdown), exercícios, comando `lab` e o dashboard em
 
 O `down` desregistra cada VM da Red Hat antes de apagá-la, para os ciclos
 efêmeros não acumularem sistemas na sua conta.
+
+## Fase 4: ciclo de vida do lab
+
+| Comando | O que faz | Perde o que foi feito? | Tempo |
+|---|---|---|---|
+| `up` | Cria, provisiona e tira o snapshot `pronto`. Se o lab já existe e está provisionado, só liga | - | ~30 min na 1a vez; ~1 min depois |
+| `stop` | Desliga as 3 VMs de forma limpa | Não | ~30 s |
+| `start` | Liga de novo, do ponto em que parou | Não | ~1 min |
+| `reset` | Volta as 3 VMs ao snapshot `pronto` | **Sim**, tudo depois do snapshot | ~1-2 min |
+| `snapshot` | Substitui o `pronto` pelo estado atual | Não (mas o `pronto` antigo some) | ~1-2 min |
+| `provision` | Roda o Ansible de novo e refaz o `pronto` | Não | ~20-30 min |
+| `down` | Desregistra da Red Hat e apaga as 3 VMs | **Sim**, tudo | ~1 min |
+
+O snapshot é tirado com as VMs desligadas (consistente, sem memória e sem
+relógio parado no passado após o reset). O `reset` também apaga o histórico
+do dashboard, que mora na workstation. As VMs continuam registradas na Red
+Hat entre `stop`/`start`/`reset`; só o `down` desregistra.
+
+Tudo roda numa sessão **normal** do PowerShell 7. Só o `setup-host.ps1`
+precisa de administrador. Evite rodar o `lab.ps1` elevado: VMs ligadas por
+um processo de administrador podem ficar invisíveis para o `vmrun` e o VMware
+Workstation de uma sessão normal, e vice-versa.
 
 ## Problemas comuns na fase 1
 
