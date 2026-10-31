@@ -31,7 +31,20 @@
     # Senha do usuário "student" em todas as VMs (uso apenas local/lab).
     StudentPassword = 'troque-esta-senha'
 
-    # Subscription Red Hat Developer (usadas a partir da fase 3).
+    # Subscription Red Hat Developer: cada VM se registra no provisionamento
+    # e é desregistrada no `lab.ps1 down`. Gere em
+    # https://console.redhat.com/insights/connector/activation-keys
     RhsmOrgId         = ''
     RhsmActivationKey = ''
+
+    # Senha de root das 3 VMs (login de console, como no homelab).
+    # Vazia = root travado, só entra por chave (padrão do projeto).
+    RootPassword      = ''
+
+    # Mirror flatpak "myrepo" (~1,6 GB baixados do Flathub a cada provisionamento).
+    # $false = provisionamento mais rápido, mas examsim-flatpak e dyn-flatpak-* não funcionam.
+    FlatpakMirror     = $true
+
+    # Gravação dos terminais em /var/log/rhcsa-rec (pré-requisito da revisão por IA).
+    RecordingEnabled  = $false
 }

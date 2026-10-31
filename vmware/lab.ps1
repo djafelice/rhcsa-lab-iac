@@ -7,13 +7,16 @@
     Comandos:
       check   Confere ferramentas, configuração, rede e tradução de IPs.
       image   Constrói a imagem golden RHEL 10 com o Packer (uma vez).
-      up      Cria (clones vinculados da golden) e liga as 3 VMs do lab.
-      down    Desliga e apaga as 3 VMs do lab (a golden não é tocada).
+      up         Cria (clones vinculados da golden), liga e provisiona as
+                 3 VMs do lab. -NoProvision: só a infraestrutura.
+      provision  Roda (de novo) o provisionamento Ansible nas VMs ligadas.
+      down       Desregistra da Red Hat, desliga e apaga as 3 VMs do lab
+                 (a golden não é tocada).
       status  Mostra o estado das VMs do lab.
       ssh     Abre SSH como student numa VM: lab.ps1 ssh servera
       help    Mostra esta ajuda.
 
-    Próximas fases: provisionamento (Ansible), snapshot, reset.
+    Próxima fase: snapshot e reset.
 
 .EXAMPLE
     .\vmware\lab.ps1 check
@@ -29,7 +32,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('check', 'image', 'up', 'down', 'status', 'ssh', 'help')]
+    [ValidateSet('check', 'image', 'up', 'provision', 'down', 'status', 'ssh', 'help')]
     [string]$Command = 'help',
 
     # ssh: nome da VM (workstation, servera, serverb).
@@ -41,7 +44,10 @@ param(
     [switch]$Force,
 
     # up: liga as VMs com janela no VMware Workstation (padrão: em segundo plano).
-    [switch]$Gui
+    [switch]$Gui,
+
+    # up: cria só a infraestrutura, sem rodar o Ansible.
+    [switch]$NoProvision
 )
 
 . "$PSScriptRoot\lib\LabCommon.ps1"
@@ -62,8 +68,8 @@ function Invoke-Check {
         if ($c) { Write-Ok "$cmd ($($c.Source))" } else { Fail "$cmd não está no PATH" }
     }
     try { Write-Ok "openssl do Git ($(Get-GitOpenSsl))" } catch { Fail $_.Exception.Message }
-    if (Get-Module -ListAvailable powershell-yaml) { Write-Ok 'módulo powershell-yaml' }
-    else { Fail 'módulo powershell-yaml ausente (Install-PSResource powershell-yaml -Scope CurrentUser -TrustRepository)' }
+    try { Import-LabYaml; Write-Ok "módulo powershell-yaml ($((Get-Module powershell-yaml).ModuleBase))" }
+    catch { Fail $_.Exception.Message }
 
     $autocrlf = (& git -C $paths.Repo config --get core.autocrlf) 2>$null
     if ($autocrlf -eq 'false' -or (Test-Path (Join-Path $paths.Repo '.gitattributes'))) { Write-Ok "quebras de linha (core.autocrlf=$autocrlf, .gitattributes presente)" }
@@ -222,7 +228,7 @@ function Invoke-Image {
 # de machines.yaml (todos no controlador SCSI, depois do disco do SO:
 # serverb fica com sdb=6G, sdc=1G, sdd=2G, sde=3G; os exercícios acham os
 # discos por tamanho, nunca pelo nome).
-function Set-LabVmConfig([hashtable]$Settings, [string]$VmName, $Spec, [string]$Vmx) {
+function Set-LabVmConfig([hashtable]$Settings, [string]$VmName, $Spec, [string]$Vmx, [bool]$IsController = $false) {
     $vmDir = Split-Path -Parent $Vmx
     $vdisk = Get-VmwareTool $Settings 'vmware-vdiskmanager.exe'
     $cfg = Read-Vmx $Vmx
@@ -237,6 +243,12 @@ function Set-LabVmConfig([hashtable]$Settings, [string]$VmName, $Spec, [string]$
     foreach ($k in @($cfg.Keys | Where-Object { $_ -match '^(ide|sata)\d+:\d+\.deviceType$' -and $cfg[$_] -like 'cdrom*' })) {
         $dev = $k -replace '\.deviceType$', ''
         $cfg["$dev.startConnected"] = 'FALSE'
+    }
+    # A workstation (controladora do provisionamento e host do classroom)
+    # recebe a ISO no CD: dela saem o ansible-core e o mirror de pacotes.
+    if ($IsController) {
+        [void](Set-VmxCdrom $cfg $Settings.IsoPath)
+        Write-Ok "$VmName com a ISO no CD-ROM (provisionamento)"
     }
 
     # NICs: substitui a placa da golden pelas de machines.yaml.
@@ -284,6 +296,9 @@ function Invoke-Up {
     $m = Get-LabMachines
     $golden = Get-GoldenVmx $s $m.image
     if (-not (Test-Path $golden)) { throw 'A imagem golden não existe. Rode: .\vmware\lab.ps1 image' }
+    if (-not $NoProvision -and -not (Test-Path -LiteralPath $s.IsoPath -PathType Leaf)) {
+        throw "ISO não encontrada em '$($s.IsoPath)' (o provisionamento precisa dela). Ajuste IsoPath em vmware\settings.psd1."
+    }
     $snaps = Invoke-Vmrun $s @('listSnapshots', $golden)
     if (-not ($snaps -match '^\s*base\s*$')) { throw "A golden não tem o snapshot 'base'. Rode: .\vmware\lab.ps1 image -Force" }
     $key = Initialize-StudentKey
@@ -298,7 +313,7 @@ function Invoke-Up {
             Write-Step "Clonando $vmName (clone vinculado de '$($m.image)', snapshot 'base')"
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $vmx) | Out-Null
             Invoke-Vmrun $s @('clone', $golden, $vmx, 'linked', '-snapshot=base', "-cloneName=rhcsa-lab-$vmName") | Out-Null
-            Set-LabVmConfig -Settings $s -VmName $vmName -Spec $spec -Vmx $vmx
+            Set-LabVmConfig -Settings $s -VmName $vmName -Spec $spec -Vmx $vmx -IsController ($vmName -eq $m.classroom.host)
             Write-Ok ("{0,-12} {1} vCPU, {2} MiB, {3} NIC(s), IP {4}" -f $vmName, $spec.cpus, $spec.memory_mb, @($spec.nics).Count, $spec.ip)
         }
 
@@ -345,7 +360,174 @@ function Invoke-Up {
     Write-Host ''
     if ($problems -gt 0) { Write-Host "$problems problema(s) na conferência." -ForegroundColor Red; exit 1 }
     Write-Host 'Infraestrutura do lab no ar.' -ForegroundColor Green
-    Write-Host 'Próximo passo (fase 3): provisionamento com o Ansible. Por ora: .\vmware\lab.ps1 ssh workstation'
+    if ($NoProvision) {
+        Write-Host 'Provisionamento pulado (-NoProvision). Quando quiser: .\vmware\lab.ps1 provision'
+        return
+    }
+    Invoke-Provision
+}
+
+# -------------------------------------------------------------- provision ---
+# Liga/desliga uma VM e espera o estado (vmrun stop soft depende do
+# open-vm-tools, presente na golden).
+function Stop-LabVm([hashtable]$Settings, [string]$Vmx) {
+    Invoke-Vmrun $Settings @('stop', $Vmx, 'soft') -AllowFailure | Out-Null
+    $deadline = (Get-Date).AddSeconds(90)
+    while ((Test-VmRunning $Settings $Vmx) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 3 }
+    if (Test-VmRunning $Settings $Vmx) { Invoke-Vmrun $Settings @('stop', $Vmx, 'hard') -AllowFailure | Out-Null }
+}
+
+# Dispara uma fase do run.sh na controladora via systemd-run (sobrevive a
+# quedas do SSH) e acompanha o log por polling até o código de saída.
+function Invoke-RemotePhase([string]$Ip, [string]$Phase, [int]$TimeoutMin) {
+    $log = "/var/log/rhcsa-lab-provision-$Phase.log"
+    $rc  = "/var/log/rhcsa-lab-provision-$Phase.rc"
+    $r = Invoke-LabSsh $Ip "sudo rm -f $log $rc; sudo systemd-run --quiet --unit=rhcsa-lab-provision-$Phase --collect -p StandardOutput=append:$log -p StandardError=append:$log /bin/bash /root/rhcsa-provision/run.sh $Phase"
+    if ($r.ExitCode -ne 0) { throw "Não consegui iniciar a fase '$Phase': $($r.Output -join ' ')" }
+
+    $next = 1
+    $warned = $false
+    $deadline = (Get-Date).AddMinutes($TimeoutMin)
+    while ($true) {
+        Start-Sleep -Seconds 5
+        $cmd = 'n=$(sudo cat {0} 2>/dev/null | wc -l); n=${{n:-0}}; [ $n -ge {2} ] && sudo sed -n {2},${{n}}p {0}; echo __N__$n; sudo cat {1} 2>/dev/null' -f $log, $rc, $next
+        $p = Invoke-LabSsh $Ip $cmd
+        if ($p.ExitCode -eq 255) {
+            if (-not $warned) { Write-Warn 'SSH com a workstation caiu; o provisionamento continua lá dentro, reconectando...'; $warned = $true }
+            if ((Get-Date) -gt $deadline) { throw "Tempo esgotado na fase '$Phase'." }
+            continue
+        }
+        $warned = $false
+        $code = $null
+        $afterMarker = $false
+        foreach ($line in $p.Output) {
+            $l = [string]$line
+            if ($afterMarker) { if ($l.Trim() -match '^\d+$') { $code = [int]$l.Trim() }; continue }
+            if ($l -match '^__N__(\d+)$') { $next = [int]$Matches[1] + 1; $afterMarker = $true; continue }
+            Write-Host $l
+        }
+        if ($null -ne $code) {
+            if ($code -ne 0) { throw "A fase '$Phase' falhou (código $code). Log completo na workstation: $log" }
+            return
+        }
+        if ((Get-Date) -gt $deadline) { throw "Tempo esgotado na fase '$Phase' ($TimeoutMin min). Log: $log" }
+    }
+}
+
+function Invoke-Provision {
+    $s = Get-LabSettings
+    $m = Get-LabMachines
+    $paths = Get-LabPaths
+    if ([string]::IsNullOrWhiteSpace($s.RhsmOrgId) -or [string]::IsNullOrWhiteSpace($s.RhsmActivationKey)) {
+        throw 'Preencha RhsmOrgId e RhsmActivationKey em vmware\settings.psd1 (subscription Red Hat Developer).'
+    }
+    # O VMware não avisa se a ISO sumiu: com msg.autoAnswer ele liga a VM
+    # com o CD vazio em silêncio (só o vmware.log registra). Confere antes.
+    if (-not (Test-Path -LiteralPath $s.IsoPath -PathType Leaf)) {
+        throw "ISO não encontrada em '$($s.IsoPath)'. Ajuste IsoPath em vmware\settings.psd1."
+    }
+    $ctl = [string]$m.classroom.host
+    $ctlIp = $m.machines[$ctl].ip
+    $ctlVmx = Get-LabVmx $s $ctl
+    $key = Initialize-StudentKey
+
+    Write-Step 'Conferindo as VMs'
+    foreach ($vmName in $m.machines.Keys) {
+        $vmx = Get-LabVmx $s $vmName
+        if (-not (Test-Path $vmx) -or -not (Test-VmRunning $s $vmx)) { throw "$vmName não está criada/ligada. Rode: .\vmware\lab.ps1 up" }
+        Wait-LabSsh $vmName $m.machines[$vmName].ip 120
+    }
+    Write-Ok 'as 3 VMs respondem SSH'
+
+    # Confere a mídia DENTRO da VM (o .vmx pode dizer que a ISO está lá e o
+    # CD ter ligado vazio). Sem mídia: reescreve o CD e religa a VM.
+    $hasMedia = { (Invoke-LabSsh $ctlIp 'sudo blkid -o value -s LABEL /dev/sr0').ExitCode -eq 0 }
+    if (-not (& $hasMedia)) {
+        Write-Step "Conectando a ISO ao CD da $ctl (desliga e religa a VM)"
+        Stop-LabVm $s $ctlVmx
+        $cfg = Read-Vmx $ctlVmx
+        [void](Set-VmxCdrom $cfg $s.IsoPath)
+        Write-Vmx $ctlVmx $cfg
+        Invoke-Vmrun $s @('start', $ctlVmx, ($(if ($Gui) { 'gui' } else { 'nogui' }))) | Out-Null
+        Wait-LabSsh $ctl $ctlIp
+        if (-not (& $hasMedia)) {
+            $vmLog = Join-Path (Split-Path -Parent $ctlVmx) 'vmware.log'
+            $why = Select-String -Path $vmLog -Pattern 'cdromImage\.cantOpen|Failed to open' -ErrorAction SilentlyContinue | Select-Object -Last 1
+            throw "A $ctl continua sem mídia no CD. Motivo no vmware.log: $(if ($why) { $why.Line } else { '(nada registrado)' })"
+        }
+    }
+    $label = (Invoke-LabSsh $ctlIp 'sudo blkid -o value -s LABEL /dev/sr0').Output -join ''
+    Write-Ok "ISO no CD da ${ctl}: $label"
+
+    Write-Step 'Montando a cópia traduzida do repositório (vmware\.work\stage)'
+    $stage = New-LabStage
+    Write-Ok "$($stage.Translated) arquivos com IPs traduzidos para $((Get-IpMap).ToCidr)"
+    $inv = New-LabInventory $m '/root/rhcsa-provision/student_key'
+    New-Item -ItemType Directory -Force -Path (Join-Path $stage.Path 'output') | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $stage.Path 'output\inventory.yml'), $inv, [System.Text.UTF8Encoding]::new($false))
+    $execList = Join-Path $paths.Stage 'executables.txt'
+    [System.IO.File]::WriteAllText($execList, (($stage.Executables -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
+    $tgz = Join-Path $paths.Stage 'repo.tgz'
+    & tar.exe -czf $tgz -C $paths.Stage repo
+    if ($LASTEXITCODE -ne 0) { throw 'tar falhou ao empacotar a cópia do repositório.' }
+    Write-Ok "$([math]::Round((Get-Item $tgz).Length / 1MB, 1)) MB empacotados"
+
+    Write-Step "Enviando para a $ctl (controladora temporária do Ansible)"
+    $up = '/tmp/rhcsa-provision-upload'
+    $r = Invoke-LabSsh $ctlIp "rm -rf $up && mkdir -m 700 $up"
+    if ($r.ExitCode -ne 0) { throw "Falha ao preparar $up na $ctl." }
+    $sshArgs = Get-LabSshArgs
+    & scp.exe -q @sshArgs $tgz $key (Join-Path $paths.Provision 'run.sh') $execList "student@${ctlIp}:$up/"
+    if ($LASTEXITCODE -ne 0) { throw 'scp falhou ao enviar os arquivos.' }
+    $r = Invoke-LabSsh $ctlIp "sudo bash $up/run.sh unpack"
+    if ($r.ExitCode -ne 0) { throw "Falha ao instalar os arquivos na ${ctl}: $($r.Output -join ' ')" }
+    Write-Ok ($r.Output -join ' ')
+    # Segredos pelo stdin do ssh: nunca são gravados no disco do Windows.
+    # O PowerShell termina o que envia por pipe com CRLF: o tr remove o \r.
+    (New-LabEnvFile $s) | & ssh.exe @sshArgs "student@$ctlIp" 'tr -d ''\r'' | sudo install -m 600 /dev/stdin /root/rhcsa-provision/lab.env'
+    if ($LASTEXITCODE -ne 0) { throw 'Falha ao gravar as variáveis da subscription na controladora.' }
+    Write-Ok 'repositório, chave e variáveis instalados em /root/rhcsa-provision'
+
+    $hadEns18 = (Invoke-LabSsh $ctlIp 'ip -br link show ens18').ExitCode -eq 0
+
+    Write-Step "Preparando a controladora (ansible-core da ISO, collections, rede da $ctl)"
+    Invoke-RemotePhase $ctlIp 'prepare' 20
+
+    if (-not $hadEns18) {
+        Write-Step "Reiniciando a $ctl para aplicar ens18"
+        Invoke-LabSsh $ctlIp 'sudo systemctl reboot' | Out-Null
+        Start-Sleep -Seconds 15
+        Wait-LabSsh $ctl $ctlIp
+        if ((Invoke-LabSsh $ctlIp 'ip -br link show ens18').ExitCode -ne 0) { throw "A $ctl voltou sem a interface ens18." }
+        Write-Ok "$ctl com ens18"
+    }
+
+    Write-Step 'Rodando ansible/site.yml (registro, pacotes, classroom, exercícios, dashboard: 15-30 min)'
+    Invoke-RemotePhase $ctlIp 'site' 120
+
+    Write-Step 'Guardando os logs em vmware\.work\logs e limpando a controladora'
+    New-Item -ItemType Directory -Force -Path $paths.Logs | Out-Null
+    & scp.exe -q @sshArgs "student@${ctlIp}:/var/log/rhcsa-lab-provision-*.log" $paths.Logs 2>$null
+    $r = Invoke-LabSsh $ctlIp 'sudo bash /root/rhcsa-provision/run.sh cleanup; sudo rm -f /var/log/rhcsa-lab-provision-*'
+    if ($r.ExitCode -ne 0) { Write-Warn "limpeza incompleta: $($r.Output -join ' ')" } else { Write-Ok 'ansible-core, chave e segredos removidos da controladora' }
+    Remove-Item -Recurse -Force $paths.Stage -ErrorAction SilentlyContinue
+
+    # Tira a ISO do CD sem desligar a VM (igual ao homelab, sem mídia).
+    $dev = (Read-Vmx $ctlVmx).Keys | Where-Object { $_ -match '^(ide|sata)\d+:\d+\.deviceType$' } | Select-Object -First 1
+    if ($dev) {
+        $dev = $dev -replace '\.deviceType$', ''
+        Invoke-Vmrun $s @('disconnectNamedDevice', $ctlVmx, $dev) -AllowFailure | Out-Null
+    }
+
+    Write-Step 'Resultado'
+    foreach ($vmName in $m.machines.Keys) {
+        $h = Invoke-LabSsh $m.machines[$vmName].ip 'hostname'
+        Write-Ok ("{0,-12} {1}  ({2})" -f $vmName, ($h.Output -join ''), $m.machines[$vmName].ip)
+    }
+    Write-Host ''
+    Write-Host 'Lab provisionado.' -ForegroundColor Green
+    Write-Host "  Dashboard: http://${ctlIp}:$($m.dashboard.port)"
+    Write-Host '  Estudar:   .\vmware\lab.ps1 ssh workstation   e depois:  lab list'
 }
 
 # ------------------------------------------------------------------- down ---
@@ -362,7 +544,17 @@ function Invoke-Down {
             $ans = Read-Host 'Confirma? Digite "sim"'
             if ($ans -ne 'sim') { Write-Host 'Cancelado.'; return }
         }
-        # Fase 4: antes de apagar, desregistrar cada VM da subscription Red Hat.
+        # Desregistra da Red Hat antes de apagar: sem isto, cada ciclo
+        # up/down deixaria 3 sistemas órfãos na sua conta.
+        $m = Get-LabMachines
+        foreach ($f in $vmxFiles) {
+            $vmName = $f.BaseName
+            if ($m.machines.Contains($vmName) -and (Test-VmRunning $s $f.FullName) -and (Test-TcpPort $m.machines[$vmName].ip 22)) {
+                $r = Invoke-LabSsh $m.machines[$vmName].ip 'sudo subscription-manager identity >/dev/null 2>&1 && sudo subscription-manager unregister || echo nao-registrada'
+                if ($r.ExitCode -eq 0) { Write-Ok "$vmName desregistrada da Red Hat ($(($r.Output | Select-Object -Last 1)))" }
+                else { Write-Warn "$vmName não foi desregistrada: $($r.Output -join ' ') (remova em console.redhat.com)" }
+            }
+        }
         foreach ($f in $vmxFiles) {
             $vmx = $f.FullName
             $label = $f.BaseName
@@ -419,6 +611,7 @@ switch ($Command) {
     'check'  { Invoke-Check }
     'image'  { Invoke-Image }
     'up'     { Invoke-Up }
+    'provision' { Invoke-Provision }
     'down'   { Invoke-Down }
     'status' { Invoke-Status }
     'ssh'    { Invoke-Ssh }

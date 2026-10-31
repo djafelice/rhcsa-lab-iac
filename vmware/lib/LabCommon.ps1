@@ -6,6 +6,10 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Saída do ssh (UTF-8) aparecendo com acentos corretos no terminal.
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
 # --------------------------------------------------------------- caminhos ---
 $script:VmwareBackendDir = Split-Path -Parent $PSScriptRoot
 $script:RepoRoot         = Split-Path -Parent $script:VmwareBackendDir
@@ -24,6 +28,9 @@ function Get-LabPaths {
         Kickstart   = Join-Path $script:RepoRoot 'kickstart\ks.cfg.tpl'
         Finalize    = Join-Path $script:RepoRoot 'image\finalize.sh'
         PackerDir   = Join-Path $script:VmwareBackendDir 'packer'
+        Provision   = Join-Path $script:VmwareBackendDir 'provision'
+        Stage       = Join-Path $script:WorkDir 'stage'
+        Logs        = Join-Path $script:WorkDir 'logs'
     }
 }
 
@@ -50,6 +57,15 @@ function Get-LabSettings {
     if ($s.BootMenu -notin 'grub', 'isolinux') {
         throw "BootMenu deve ser 'grub' ou 'isolinux' (atual: '$($s.BootMenu)')."
     }
+    # Opcionais (fase 3), com o mesmo padrão do .env do backend Linux.
+    $defaults = @{
+        RhsmOrgId         = ''
+        RhsmActivationKey = ''
+        RootPassword      = ''
+        FlatpakMirror     = $true
+        RecordingEnabled  = $false
+    }
+    foreach ($k in $defaults.Keys) { if (-not $s.ContainsKey($k)) { $s[$k] = $defaults[$k] } }
     $s.GoldenDir  = Join-Path $s.VmRoot 'golden'
     $s.LabDir     = Join-Path $s.VmRoot 'lab'
     return $s
@@ -75,10 +91,29 @@ function Get-GitOpenSsl {
     return $openssl
 }
 
+# ------------------------------------------------------- powershell-yaml ---
+# Carrega o powershell-yaml mesmo quando o PSModulePath da sessão foi
+# reduzido (ex.: por um perfil do PowerShell) e não inclui as pastas padrão
+# de instalação de módulos do pwsh 7 (AllUsers e CurrentUser).
+function Import-LabYaml {
+    if (Get-Module powershell-yaml) { return }
+    if (-not (Get-Module -ListAvailable powershell-yaml)) {
+        $candidates = @(
+            (Join-Path $env:ProgramFiles 'PowerShell\Modules'),
+            (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'PowerShell\Modules')
+        ) | Where-Object { (Test-Path $_) -and (($env:PSModulePath -split ';') -notcontains $_) }
+        foreach ($c in $candidates) { $env:PSModulePath = "$env:PSModulePath;$c" }
+    }
+    try { Import-Module powershell-yaml -ErrorAction Stop }
+    catch {
+        throw "Módulo powershell-yaml não encontrado. Instale com: Install-PSResource powershell-yaml -Scope AllUsers -TrustRepository (PSModulePath atual: $env:PSModulePath)"
+    }
+}
+
 # ----------------------------------------------------- tradução de IPs ---
 function Get-IpMap {
     $paths = Get-LabPaths
-    Import-Module powershell-yaml -ErrorAction Stop
+    Import-LabYaml
     $raw = ConvertFrom-Yaml (Get-Content $paths.IpMap -Raw)
     $fromNet = ($raw.network.from -split '/')[0]
     $toNet   = ($raw.network.to -split '/')[0]
@@ -125,7 +160,7 @@ function Convert-LabText {
 # machines.yaml já traduzido para a rede do VMware.
 function Get-LabMachines {
     $paths = Get-LabPaths
-    Import-Module powershell-yaml -ErrorAction Stop
+    Import-LabYaml
     $ipMap = Get-IpMap
     $text = Convert-LabText -Text (Get-Content $paths.Machines -Raw) -IpMap $ipMap -Source 'machines.yaml'
     # -Ordered: mantém a ordem do arquivo (workstation, servera, serverb) e a
@@ -296,4 +331,136 @@ function Wait-LabSsh([string]$Name, [string]$Ip, [int]$TimeoutSec = 300) {
         Start-Sleep -Seconds 3
     }
     throw "$Name ($Ip) não respondeu SSH em $TimeoutSec s. Abra o console da VM no VMware para ver o que aconteceu."
+}
+
+# ---------------------------------------------------------------- CD-ROM ---
+# Ajusta o CD-ROM do .vmx (a golden tem um, desconectado). $IsoPath vazio =
+# deixa o drive sem mídia. Só pode ser chamado com a VM desligada.
+function Set-VmxCdrom($Vmx, [string]$IsoPath) {
+    $key = @($Vmx.Keys | Where-Object { $_ -match '^(ide|sata)\d+:\d+\.deviceType$' -and $Vmx[$_] -like 'cdrom*' }) | Select-Object -First 1
+    if (-not $key) { throw 'O .vmx não tem drive de CD-ROM (a golden deveria ter um).' }
+    $dev = $key -replace '\.deviceType$', ''
+    if ($IsoPath) {
+        # Reescreve o dispositivo do zero: o Packer, ao "desanexar" a ISO no
+        # fim do build da golden, deixa chaves (autodetect, clientDevice...)
+        # que fazem o VMware ignorar o fileName e ligar o CD sem mídia.
+        Remove-VmxKeys $Vmx ('^' + [regex]::Escape($dev) + '\.')
+        $Vmx["$dev.present"]        = 'TRUE'
+        $Vmx["$dev.deviceType"]     = 'cdrom-image'
+        $Vmx["$dev.fileName"]       = $IsoPath
+        $Vmx["$dev.startConnected"] = 'TRUE'
+    } else {
+        $Vmx["$dev.startConnected"] = 'FALSE'
+    }
+    return $dev
+}
+
+function Get-VmxCdromIso($Vmx) {
+    $key = @($Vmx.Keys | Where-Object { $_ -match '^(ide|sata)\d+:\d+\.deviceType$' -and $Vmx[$_] -eq 'cdrom-image' }) | Select-Object -First 1
+    if (-not $key) { return $null }
+    $dev = $key -replace '\.deviceType$', ''
+    if ($Vmx["$dev.startConnected"] -ne 'TRUE') { return $null }
+    return $Vmx["$dev.fileName"]
+}
+
+# ------------------------------------------------- cópia traduzida do repo ---
+# Monta em .work\stage\repo a cópia do repositório que vai para a
+# workstation: arquivos rastreados pelo Git (e novos não ignorados), com os
+# IPs traduzidos por ip-map.yaml. Arquivos binários são copiados intactos.
+# Devolve a lista de caminhos executáveis segundo o Git (o checkout no
+# Windows não guarda o bit +x).
+function New-LabStage {
+    $paths = Get-LabPaths
+    $ipMap = Get-IpMap
+    $stageRepo = Join-Path $paths.Stage 'repo'
+    if (Test-Path $paths.Stage) { Remove-Item -Recurse -Force $paths.Stage }
+    New-Item -ItemType Directory -Force -Path $stageRepo | Out-Null
+
+    $files = & git -C $paths.Repo ls-files --cached --others --exclude-standard
+    if ($LASTEXITCODE -ne 0) { throw 'git ls-files falhou.' }
+    $exec = @(& git -C $paths.Repo ls-files -s | Where-Object { $_ -match '^100755 ' } | ForEach-Object { ($_ -split "`t", 2)[1] })
+
+    $translated = 0
+    foreach ($rel in $files) {
+        if ($rel -match '^(vmware|terraform)/') { continue }
+        $src = Join-Path $paths.Repo $rel
+        if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { continue }   # apagado e não commitado
+        $dst = Join-Path $stageRepo $rel
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
+        $bytes = [System.IO.File]::ReadAllBytes($src)
+        if ([Array]::IndexOf($bytes, [byte]0) -ge 0) {
+            [System.IO.File]::WriteAllBytes($dst, $bytes)
+            continue
+        }
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+        if ($text.Contains($ipMap.FromPrefix + '.')) {
+            $text = Convert-LabText -Text $text -IpMap $ipMap -Source $rel
+            $translated++
+        }
+        [System.IO.File]::WriteAllText($dst, $text, [System.Text.UTF8Encoding]::new($false))
+    }
+
+    # Playbook de bootstrap do backend VMware, ao lado do site.yml.
+    Copy-Item (Join-Path $paths.Provision 'vmware-bootstrap-ws.yml') (Join-Path $stageRepo 'ansible\vmware-bootstrap-ws.yml')
+
+    [pscustomobject]@{ Path = $stageRepo; Translated = $translated; Executables = $exec }
+}
+
+# Inventário no mesmo formato do que o Terraform gera (terraform/main.tf),
+# com os caminhos da controladora (workstation).
+function New-LabInventory($Machines, [string]$KeyPathOnController) {
+    $spec = $Machines
+    $ip = { param($n) $spec.machines[$n].ip }
+    $sb = [System.Text.StringBuilder]::new()
+    $hostsIp = ($spec.machines.Keys | ForEach-Object { "      ${_}: $(& $ip $_)" }) -join "`n"
+    [void]$sb.Append(@"
+# Gerado por vmware\lab.ps1 provision (backend VMware). Mesmo formato do
+# inventário do Terraform; IPs já traduzidos por vmware\ip-map.yaml.
+all:
+  vars:
+    ansible_user: $($spec.student.username)
+    ansible_ssh_private_key_file: $KeyPathOnController
+    lab_domain: $($spec.domain)
+    lab_student_user: $($spec.student.username)
+    lab_network_cidr: $($spec.network.cidr)
+    lab_gateway_ip: $($spec.network.gateway)
+    lab_hosts_ip:
+$hostsIp
+    classroom_host: $($spec.classroom.host)
+    classroom_ip: $(& $ip $spec.classroom.host)
+    classroom_port: $($spec.classroom.port)
+    dashboard_host: $($spec.dashboard.host)
+    dashboard_port: $($spec.dashboard.port)
+    dashboard_allowed_source: $($spec.dashboard.allowed_source)
+    workstation_ip: $(& $ip 'workstation')
+    servera_ip: $(& $ip 'servera')
+    serverb_ip: $(& $ip 'serverb')
+  children:
+
+"@)
+    foreach ($n in $spec.machines.Keys) {
+        [void]$sb.Append("    ${n}:`n      hosts:`n        ${n}:`n          ansible_host: $(& $ip $n)`n")
+    }
+    [void]$sb.Append("    lab_hosts:`n      children:`n")
+    foreach ($n in $spec.machines.Keys) {
+        if ($spec.machines[$n].role -eq 'server') { [void]$sb.Append("        ${n}: {}`n") }
+    }
+    return ($sb.ToString() -replace "`r`n", "`n")
+}
+
+# Variáveis de ambiente lidas pelo Ansible (lookup env), como o .env do
+# backend Linux. Valores entre aspas simples, com escape para o shell.
+function New-LabEnvFile([hashtable]$Settings) {
+    function Q([string]$v) { "'" + ($v -replace "'", "'\''") + "'" }
+    $flatpak   = ([string][bool]$Settings.FlatpakMirror).ToLower()
+    $recording = ([string][bool]$Settings.RecordingEnabled).ToLower()
+    $lines = @(
+        "export RHSM_ORG_ID=$(Q $Settings.RhsmOrgId)",
+        "export RHSM_ACTIVATION_KEY=$(Q $Settings.RhsmActivationKey)",
+        "export LAB_ROOT_PASSWORD=$(Q $Settings.RootPassword)",
+        "export FLATPAK_MIRROR_ENABLED=$(Q $flatpak)",
+        "export RHCSA_RECORDING_ENABLED=$(Q $recording)",
+        "export AI_REVIEW_ENABLED='false'"
+    )
+    return (($lines -join "`n") + "`n")
 }

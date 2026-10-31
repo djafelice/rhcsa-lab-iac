@@ -17,8 +17,8 @@ infraestrutura mudam.
 
 - [x] **Fase 1**: configuração, tradução de IPs, imagem golden
 - [x] **Fase 2**: `up` / `down` / `status` / `ssh` da infraestrutura (clones vinculados)
-- [ ] Fase 3: provisionamento com o Ansible original
-- [ ] Fase 4: snapshot, reset, desregistro da subscription
+- [x] **Fase 3**: provisionamento com o Ansible original (workstation como controladora)
+- [ ] Fase 4: snapshot e reset
 
 ## Requisitos
 
@@ -95,7 +95,7 @@ VM**: ela é só a base dos clones.
 ## Fase 2: infraestrutura efêmera
 
 ```powershell
-.\vmware\lab.ps1 up          # cria e liga as 3 VMs (em segundo plano)
+.\vmware\lab.ps1 up -NoProvision   # só cria e liga as 3 VMs (em segundo plano)
 .\vmware\lab.ps1 up -Gui     # idem, abrindo as janelas no Workstation
 .\vmware\lab.ps1 status      # estado, IP e SSH de cada VM
 .\vmware\lab.ps1 ssh servera # entra como student (sudo sem senha)
@@ -118,8 +118,47 @@ até lá as placas têm o nome padrão do kernel. No fim, o `up` entra por SSH
 em cada VM e confere se os MACs e os tamanhos dos discos batem com
 `machines.yaml`.
 
-Nesta fase as VMs ainda são o RHEL "cru" da golden: sem registro na Red
+Com `-NoProvision` as VMs ficam o RHEL "cru" da golden: sem registro na Red
 Hat, sem exercícios e sem dashboard.
+
+## Fase 3: provisionamento
+
+```powershell
+.\vmware\lab.ps1 up          # infraestrutura + provisionamento completo
+.\vmware\lab.ps1 provision   # roda de novo só o provisionamento
+```
+
+O Windows não roda Ansible, então a **workstation vira a controladora
+temporária**. O `lab.ps1`:
+
+1. Monta em `.work\stage` uma cópia do repositório (arquivos do Git) com os
+   IPs traduzidos por `ip-map.yaml`, gera o `output/inventory.yml` no formato
+   do Terraform e envia tudo por `scp` para `/root/rhcsa-provision` na
+   workstation. Os segredos (subscription, senha de root) vão pelo stdin do
+   `ssh`, sem passar pelo disco do Windows.
+2. **prepare** (`provision/run.sh`): monta a ISO do CD da workstation,
+   instala `ansible-core` a partir dela, baixa as collections e aplica só a
+   parte de rede do role `common` na própria workstation
+   (`provision/vmware-bootstrap-ws.yml`), sem o reboot.
+3. Reinicia a workstation pelo Windows: ela volta com `ens18`. Assim, no
+   `site.yml` o role `common` não vê mudança de rede nela e não tenta
+   reiniciar a própria controladora.
+4. **site**: roda o `ansible/site.yml` original, igual ao `make provision`,
+   com `lab_iso_url=file:///mnt/rhcsa-lab-iso` (o mirror do classroom lê a ISO
+   do CD, sem servidor HTTP).
+5. **cleanup**: copia os logs para `.work\logs`, remove `ansible-core`, a
+   chave, os segredos e a cópia do repositório da workstation, e desconecta
+   a ISO.
+
+As fases rodam via `systemd-run`: se a sessão SSH do Windows cair, o
+playbook continua e o `lab.ps1` reconecta e segue acompanhando o log.
+
+Ao final: hostnames `*.lab.example.com`, `ens18`/`ens19`, repositórios
+desligados (lockdown), exercícios, comando `lab` e o dashboard em
+`http://172.16.0.10:8421`.
+
+O `down` desregistra cada VM da Red Hat antes de apagá-la, para os ciclos
+efêmeros não acumularem sistemas na sua conta.
 
 ## Problemas comuns na fase 1
 

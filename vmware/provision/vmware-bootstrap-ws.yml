@@ -1,0 +1,32 @@
+---
+# Backend VMware: aplica na workstation SÓ a parte de rede do role common
+# (ansible/roles/common/tasks/network.yml, sem cópia nem alteração), antes do
+# site.yml. Copiado para ansible/ na cópia do repositório enviada à
+# workstation, para herdar ansible/group_vars como o site.yml.
+#
+# Rodado por vmware/provision/run.sh com -e common_net_reboot=false: os
+# arquivos .link e o perfil NM "ens18" são gravados, mas o dracut e o reboot
+# do role ficam de fora (a workstation é a controladora e não pode reiniciar
+# a si mesma). A conferência final do role (ens18 presente) falha por
+# definição antes do reboot; só essa falha é tolerada.
+
+- name: Backend VMware - rede da workstation (controladora) antes do site.yml
+  hosts: workstation
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Rede do role common (ens18 pelo MAC + perfil NM), sem reboot
+      block:
+        - name: Incluir common/tasks/network.yml
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: network.yml
+      rescue:
+        - name: Tolerar só a conferência de ens18, que exige o reboot
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_task.name is search('Conferir ens18')
+            fail_msg: >-
+              Falha inesperada na rede da workstation ({{ ansible_failed_task.name }}):
+              {{ ansible_failed_result.msg | default(ansible_failed_result) }}
+            success_msg: Arquivos de rede gravados; ens18 aparece após o reboot.
