@@ -1,0 +1,23 @@
+# Tradução de endereços: rede do projeto original -> rede VMware deste host.
+#
+# Aplicada em memória ao machines.yaml lido pelos scripts PowerShell e (fase 3)
+# à cópia do repositório enviada para a workstation antes do Ansible. Os
+# arquivos versionados do projeto nunca são alterados, então o fork continua
+# sincronizável com o original.
+#
+# Todo endereço 192.168.56.X encontrado no projeto precisa estar listado aqui
+# (o endereço .0 da rede é traduzido automaticamente). Endereço não mapeado
+# faz a tradução falhar com a lista do que falta -- proteção contra exercícios
+# novos do upstream que usem IPs que ainda não existem nesta tabela.
+#
+# Mesma máscara (/24) dos dois lados: nada de cálculo de rede, só texto.
+network:
+  from: 192.168.56.0/24
+  to: 172.16.0.0/24
+
+addresses:
+  192.168.56.1: 172.16.0.1     # gateway e DNS (NAT do VMware na VMnet1)
+  192.168.56.10: 172.16.0.10   # workstation
+  192.168.56.20: 172.16.0.11   # servera
+  192.168.56.30: 172.16.0.12   # serverb
+  192.168.56.91: 172.16.0.91   # IP que o aluno configura na ens19 (examsim-network)
