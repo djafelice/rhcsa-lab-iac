@@ -7,9 +7,13 @@
     Comandos:
       check   Confere ferramentas, configuração, rede e tradução de IPs.
       image   Constrói a imagem golden RHEL 10 com o Packer (uma vez).
+      up      Cria (clones vinculados da golden) e liga as 3 VMs do lab.
+      down    Desliga e apaga as 3 VMs do lab (a golden não é tocada).
+      status  Mostra o estado das VMs do lab.
+      ssh     Abre SSH como student numa VM: lab.ps1 ssh servera
       help    Mostra esta ajuda.
 
-    Próximas fases: up, down, snapshot, reset, status, ssh.
+    Próximas fases: provisionamento (Ansible), snapshot, reset.
 
 .EXAMPLE
     .\vmware\lab.ps1 check
@@ -17,15 +21,27 @@
     .\vmware\lab.ps1 image
 .EXAMPLE
     .\vmware\lab.ps1 image -Force
+.EXAMPLE
+    .\vmware\lab.ps1 up -Gui
+.EXAMPLE
+    .\vmware\lab.ps1 ssh workstation
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('check', 'image', 'help')]
+    [ValidateSet('check', 'image', 'up', 'down', 'status', 'ssh', 'help')]
     [string]$Command = 'help',
 
+    # ssh: nome da VM (workstation, servera, serverb).
+    [Parameter(Position = 1)]
+    [string]$Name,
+
     # image: reconstrói a golden mesmo se já existir.
-    [switch]$Force
+    # down: não pede confirmação.
+    [switch]$Force,
+
+    # up: liga as VMs com janela no VMware Workstation (padrão: em segundo plano).
+    [switch]$Gui
 )
 
 . "$PSScriptRoot\lib\LabCommon.ps1"
@@ -109,7 +125,7 @@ function Invoke-Check {
         $vmx = Get-GoldenVmx $s $m.image
         if (Test-Path $vmx) {
             $snaps = Invoke-Vmrun $s @('listSnapshots', $vmx) -AllowFailure
-            if ($snaps -match '^base$') { Write-Ok "$vmx (snapshot 'base')" }
+            if ($snaps -match '^\s*base\s*$') { Write-Ok "$vmx (snapshot 'base')" }
             else { Fail "golden existe sem o snapshot 'base' (rode: .\vmware\lab.ps1 image -Force)" }
         } else { Write-Warn "golden ainda não construída (rode: .\vmware\lab.ps1 image)" }
     }
@@ -200,9 +216,211 @@ function Invoke-Image {
     Write-Host 'Imagem golden pronta. Não ligue esta VM: ela é só a base dos clones.' -ForegroundColor Green
 }
 
+# --------------------------------------------------------------------- up ---
+# Configura o .vmx de um clone recém-criado: CPU/memória, NICs com os MACs
+# fixos de machines.yaml na VMnet do lab e os discos extra brutos, na ordem
+# de machines.yaml (todos no controlador SCSI, depois do disco do SO:
+# serverb fica com sdb=6G, sdc=1G, sdd=2G, sde=3G; os exercícios acham os
+# discos por tamanho, nunca pelo nome).
+function Set-LabVmConfig([hashtable]$Settings, [string]$VmName, $Spec, [string]$Vmx) {
+    $vmDir = Split-Path -Parent $Vmx
+    $vdisk = Get-VmwareTool $Settings 'vmware-vdiskmanager.exe'
+    $cfg = Read-Vmx $Vmx
+
+    $cfg['displayName'] = "rhcsa-lab-$VmName"
+    $cfg['memsize']     = [string]$Spec.memory_mb
+    $cfg['numvcpus']    = [string]$Spec.cpus
+    # Responde sozinho a perguntas do tipo "você moveu ou copiou esta VM?",
+    # que deixariam o vmrun start pendurado.
+    $cfg['msg.autoAnswer'] = 'TRUE'
+    # O CD da golden fica desconectado (a ISO só volta na fase 3, se preciso).
+    foreach ($k in @($cfg.Keys | Where-Object { $_ -match '^(ide|sata)\d+:\d+\.deviceType$' -and $cfg[$_] -like 'cdrom*' })) {
+        $dev = $k -replace '\.deviceType$', ''
+        $cfg["$dev.startConnected"] = 'FALSE'
+    }
+
+    # NICs: substitui a placa da golden pelas de machines.yaml.
+    Remove-VmxKeys $cfg '^ethernet\d+\.'
+    $i = 0
+    foreach ($nic in $Spec.nics) {
+        $e = "ethernet$i"
+        $cfg["$e.present"]         = 'TRUE'
+        $cfg["$e.connectionType"]  = 'custom'
+        $cfg["$e.vnet"]            = $Settings.VmNet
+        $cfg["$e.virtualDev"]      = 'vmxnet3'
+        $cfg["$e.addressType"]     = 'static'
+        $cfg["$e.address"]         = ([string]$nic.mac).ToLower()
+        # MACs do homelab (prefixo bc:24:11, do Proxmox) ficam fora da faixa
+        # estática do VMware (00:50:56); sem isto o VMware recusa o endereço.
+        $cfg["$e.checkMACAddress"] = 'FALSE'
+        $cfg["$e.startConnected"]  = 'TRUE'
+        $i++
+    }
+
+    # Discos extra no scsi0, a partir da unidade 1 (a 0 é o disco do SO).
+    $unit = 1
+    if ($Spec.Contains('extra_disks')) {
+        foreach ($d in $Spec.extra_disks) {
+            if ($unit -eq 7) { $unit++ }   # scsi0:7 é reservado ao controlador
+            $file = "$VmName-$($d.label).vmdk"
+            $full = Join-Path $vmDir $file
+            if (-not (Test-Path $full)) {
+                & $vdisk -c -s "$($d.size_gb)GB" -a lsilogic -t 0 $full | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw "vmware-vdiskmanager falhou ao criar $file" }
+            }
+            $cfg["scsi0:$unit.present"]  = 'TRUE'
+            $cfg["scsi0:$unit.fileName"] = $file
+            $cfg["scsi0:$unit.mode"]     = 'persistent'
+            Write-Ok ("{0,-12} disco {1} GiB -> scsi0:{2} ({3})" -f $VmName, $d.size_gb, $unit, $d.label)
+            $unit++
+        }
+    }
+
+    Write-Vmx $Vmx $cfg
+}
+
+function Invoke-Up {
+    $s = Get-LabSettings
+    $m = Get-LabMachines
+    $golden = Get-GoldenVmx $s $m.image
+    if (-not (Test-Path $golden)) { throw 'A imagem golden não existe. Rode: .\vmware\lab.ps1 image' }
+    $snaps = Invoke-Vmrun $s @('listSnapshots', $golden)
+    if (-not ($snaps -match '^\s*base\s*$')) { throw "A golden não tem o snapshot 'base'. Rode: .\vmware\lab.ps1 image -Force" }
+    $key = Initialize-StudentKey
+
+    foreach ($vmName in $m.machines.Keys) {
+        $spec = $m.machines[$vmName]
+        $vmx = Get-LabVmx $s $vmName
+
+        if (Test-Path $vmx) {
+            Write-Step "$vmName já existe ($vmx)"
+        } else {
+            Write-Step "Clonando $vmName (clone vinculado de '$($m.image)', snapshot 'base')"
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $vmx) | Out-Null
+            Invoke-Vmrun $s @('clone', $golden, $vmx, 'linked', '-snapshot=base', "-cloneName=rhcsa-lab-$vmName") | Out-Null
+            Set-LabVmConfig -Settings $s -VmName $vmName -Spec $spec -Vmx $vmx
+            Write-Ok ("{0,-12} {1} vCPU, {2} MiB, {3} NIC(s), IP {4}" -f $vmName, $spec.cpus, $spec.memory_mb, @($spec.nics).Count, $spec.ip)
+        }
+
+        if (Test-VmRunning $s $vmx) {
+            Write-Ok "$vmName já está ligada"
+        } else {
+            Invoke-Vmrun $s @('start', $vmx, ($(if ($Gui) { 'gui' } else { 'nogui' }))) | Out-Null
+            Write-Ok "$vmName ligada"
+        }
+    }
+
+    Write-Step 'Aguardando SSH nas VMs (primeiro boot gera chaves e machine-id)'
+    foreach ($vmName in $m.machines.Keys) {
+        $spec = $m.machines[$vmName]
+        Wait-LabSsh $vmName $spec.ip
+        Write-Ok "$vmName ($($spec.ip)) responde SSH"
+    }
+
+    Write-Step 'Conferindo NICs e discos dentro das VMs'
+    $problems = 0
+    foreach ($vmName in $m.machines.Keys) {
+        $spec = $m.machines[$vmName]
+        # Sem aspas duplas no comando remoto: elas passariam por duas camadas
+        # de escape (PowerShell -> ssh.exe -> shell remoto).
+        $r = Invoke-LabSsh $spec.ip "ip -br link | awk '{print `$3}'; echo ---; lsblk -dnbo SIZE,TYPE | awk '`$2 ~ /disk/ {print `$1}'"
+        if ($r.ExitCode -ne 0) { Write-Fail "${vmName}: falha ao consultar NICs/discos: $($r.Output -join ' ')"; $problems++; continue }
+        $parts = @(($r.Output -join "`n") -split '---') + @('', '')
+        $macs  = @($parts[0] -split '\s+' | Where-Object { $_ } | ForEach-Object { $_.ToLower() })
+        $sizes = @($parts[1] -split '\s+' | Where-Object { $_ })
+        foreach ($nic in $spec.nics) {
+            $mac = ([string]$nic.mac).ToLower()
+            if ($macs -contains $mac) { Write-Ok "$vmName NIC $mac (vai virar $($nic.name))" }
+            else { Write-Fail "$vmName sem NIC com MAC $mac"; $problems++ }
+        }
+        if ($spec.Contains('extra_disks')) {
+            foreach ($d in $spec.extra_disks) {
+                $bytes = [string]([int64]$d.size_gb * 1GB)
+                if ($sizes -contains $bytes) { Write-Ok "$vmName disco de $($d.size_gb) GiB presente" }
+                else { Write-Fail "$vmName sem disco de $($d.size_gb) GiB ($bytes bytes)"; $problems++ }
+            }
+        }
+    }
+
+    Write-Host ''
+    if ($problems -gt 0) { Write-Host "$problems problema(s) na conferência." -ForegroundColor Red; exit 1 }
+    Write-Host 'Infraestrutura do lab no ar.' -ForegroundColor Green
+    Write-Host 'Próximo passo (fase 3): provisionamento com o Ansible. Por ora: .\vmware\lab.ps1 ssh workstation'
+}
+
+# ------------------------------------------------------------------- down ---
+function Invoke-Down {
+    $s = Get-LabSettings
+    $paths = Get-LabPaths
+    $vmxFiles = @(Get-ChildItem -Path $s.LabDir -Recurse -Filter *.vmx -ErrorAction SilentlyContinue)
+    if ($vmxFiles.Count -eq 0) {
+        Write-Host "Nenhuma VM do lab em $($s.LabDir)."
+    } else {
+        Write-Host 'VMs que serão APAGADAS:'
+        $vmxFiles | ForEach-Object { Write-Host "  $($_.FullName)" }
+        if (-not $Force) {
+            $ans = Read-Host 'Confirma? Digite "sim"'
+            if ($ans -ne 'sim') { Write-Host 'Cancelado.'; return }
+        }
+        # Fase 4: antes de apagar, desregistrar cada VM da subscription Red Hat.
+        foreach ($f in $vmxFiles) {
+            $vmx = $f.FullName
+            $label = $f.BaseName
+            if (Test-VmRunning $s $vmx) {
+                Write-Step "Desligando $label"
+                Invoke-Vmrun $s @('stop', $vmx, 'soft') -AllowFailure | Out-Null
+                if (Test-VmRunning $s $vmx) { Invoke-Vmrun $s @('stop', $vmx, 'hard') -AllowFailure | Out-Null }
+            }
+            Write-Step "Apagando $label"
+            Invoke-Vmrun $s @('deleteVM', $vmx) -AllowFailure | Out-Null
+            $dir = $f.DirectoryName
+            if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+            Write-Ok $label
+        }
+    }
+    Remove-Item -Force (Join-Path $paths.Work 'known_hosts') -ErrorAction SilentlyContinue
+    Write-Host 'Lab removido. A imagem golden continua intacta.' -ForegroundColor Green
+}
+
+# ----------------------------------------------------------------- status ---
+function Invoke-Status {
+    $s = Get-LabSettings
+    $m = Get-LabMachines
+    $rows = foreach ($vmName in $m.machines.Keys) {
+        $spec = $m.machines[$vmName]
+        $vmx = Get-LabVmx $s $vmName
+        $state = if (-not (Test-Path $vmx)) { 'não criada' } elseif (Test-VmRunning $s $vmx) { 'ligada' } else { 'desligada' }
+        $ssh = if ($state -eq 'ligada' -and (Test-TcpPort $spec.ip 22)) { 'ok' } else { '-' }
+        [pscustomobject]@{ VM = $vmName; IP = $spec.ip; Estado = $state; SSH = $ssh }
+    }
+    $rows | Format-Table -AutoSize
+    $golden = Get-GoldenVmx $s $m.image
+    Write-Host ("Golden: {0}" -f $(if (Test-Path $golden) { $golden } else { 'não construída' }))
+}
+
+# -------------------------------------------------------------------- ssh ---
+function Invoke-Ssh {
+    $m = Get-LabMachines
+    if (-not $Name -or -not $m.machines.Contains($Name)) {
+        throw "Informe a VM: .\vmware\lab.ps1 ssh <$((@($m.machines.Keys)) -join '|')>"
+    }
+    $ip = $m.machines[$Name].ip
+    # Sem BatchMode (sessão interativa): remove o par '-o BatchMode=yes'.
+    $sshArgs = @(); $all = Get-LabSshArgs
+    for ($i = 0; $i -lt $all.Count; $i++) {
+        if ($all[$i] -eq '-o' -and $all[$i + 1] -eq 'BatchMode=yes') { $i++; continue }
+        $sshArgs += $all[$i]
+    }
+    & ssh.exe @sshArgs "student@$ip"
+}
+
 # ------------------------------------------------------------------- main ---
 switch ($Command) {
-    'check' { Invoke-Check }
-    'image' { Invoke-Image }
-    default { Get-Help $PSCommandPath -Detailed }
+    'check'  { Invoke-Check }
+    'image'  { Invoke-Image }
+    'up'     { Invoke-Up }
+    'down'   { Invoke-Down }
+    'status' { Invoke-Status }
+    'ssh'    { Invoke-Ssh }
+    default  { Get-Help $PSCommandPath -Detailed }
 }

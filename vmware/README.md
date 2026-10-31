@@ -16,7 +16,7 @@ infraestrutura mudam.
 ## Estado
 
 - [x] **Fase 1**: configuração, tradução de IPs, imagem golden
-- [ ] Fase 2: `up` / `down` da infraestrutura (clones vinculados)
+- [x] **Fase 2**: `up` / `down` / `status` / `ssh` da infraestrutura (clones vinculados)
 - [ ] Fase 3: provisionamento com o Ansible original
 - [ ] Fase 4: snapshot, reset, desregistro da subscription
 
@@ -91,6 +91,35 @@ janela da VM.
 
 O resultado fica em `<VmRoot>\golden\rhel10-rhcsa-base\`. **Não ligue essa
 VM**: ela é só a base dos clones.
+
+## Fase 2: infraestrutura efêmera
+
+```powershell
+.\vmware\lab.ps1 up          # cria e liga as 3 VMs (em segundo plano)
+.\vmware\lab.ps1 up -Gui     # idem, abrindo as janelas no Workstation
+.\vmware\lab.ps1 status      # estado, IP e SSH de cada VM
+.\vmware\lab.ps1 ssh servera # entra como student (sudo sem senha)
+.\vmware\lab.ps1 down        # desliga e apaga as 3 VMs (pede confirmação)
+```
+
+O `up` é idempotente: VMs que já existem não são recriadas, só ligadas.
+Cada VM é um **clone vinculado** do snapshot `base` da golden, então nasce
+em segundos e guarda só as diferenças. O script ajusta o `.vmx` de cada
+clone a partir de `machines.yaml`:
+
+| VM | CPU / RAM | NICs (MAC fixo, VMnet do lab) | Discos extra (SCSI, nesta ordem) |
+|---|---|---|---|
+| workstation | 2 / 2048 | ens18 | - |
+| servera | 2 / 2048 | ens18, ens19 | 2 GiB, 3 GiB |
+| serverb | 2 / 2048 | ens18 | 6 GiB, 1 GiB, 2 GiB, 3 GiB |
+
+Os nomes `ens18`/`ens19` só aparecem depois do provisionamento (fase 3);
+até lá as placas têm o nome padrão do kernel. No fim, o `up` entra por SSH
+em cada VM e confere se os MACs e os tamanhos dos discos batem com
+`machines.yaml`.
+
+Nesta fase as VMs ainda são o RHEL "cru" da golden: sem registro na Red
+Hat, sem exercícios e sem dashboard.
 
 ## Problemas comuns na fase 1
 

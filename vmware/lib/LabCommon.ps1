@@ -128,7 +128,9 @@ function Get-LabMachines {
     Import-Module powershell-yaml -ErrorAction Stop
     $ipMap = Get-IpMap
     $text = Convert-LabText -Text (Get-Content $paths.Machines -Raw) -IpMap $ipMap -Source 'machines.yaml'
-    return ConvertFrom-Yaml $text
+    # -Ordered: mantém a ordem do arquivo (workstation, servera, serverb) e a
+    # ordem dos discos extra, que define sdb/sdc/... dentro das VMs.
+    return ConvertFrom-Yaml $text -Ordered
 }
 
 # --------------------------------------------------------- chave do student ---
@@ -210,4 +212,88 @@ function Invoke-Vmrun([hashtable]$Settings, [string[]]$Arguments, [switch]$Allow
 
 function Get-GoldenVmx([hashtable]$Settings, [string]$ImageName) {
     Join-Path (Join-Path $Settings.GoldenDir $ImageName) "$ImageName.vmx"
+}
+
+# --------------------------------------------------------------- arquivos .vmx ---
+# O .vmx é uma lista de linhas  chave = "valor"  com chaves sem distinção de
+# maiúsculas (o Packer grava em minúsculas, o VMware em camelCase). O
+# dicionário abaixo é ordenado e case-insensitive para não duplicar chaves.
+function Read-Vmx([string]$Path) {
+    $vmx = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($line in Get-Content -Path $Path) {
+        if ($line -match '^\s*([^=\s]+)\s*=\s*"(.*)"\s*$') { $vmx[$Matches[1]] = $Matches[2] }
+    }
+    return $vmx
+}
+
+function Write-Vmx([string]$Path, $Vmx) {
+    $sb = [System.Text.StringBuilder]::new()
+    foreach ($k in $Vmx.Keys) { [void]$sb.Append("$k = `"$($Vmx[$k])`"`n") }
+    [System.IO.File]::WriteAllText($Path, $sb.ToString(), [System.Text.UTF8Encoding]::new($false))
+}
+
+function Remove-VmxKeys($Vmx, [string]$Pattern) {
+    $toRemove = @($Vmx.Keys | Where-Object { $_ -match $Pattern })
+    foreach ($k in $toRemove) { $Vmx.Remove($k) }
+}
+
+# -------------------------------------------------------------- VMs do lab ---
+function Get-LabVmx([hashtable]$Settings, [string]$Name) {
+    Join-Path (Join-Path $Settings.LabDir $Name) "$Name.vmx"
+}
+
+function Get-RunningVmx([hashtable]$Settings) {
+    $out = Invoke-Vmrun $Settings @('list') -AllowFailure
+    # 1a linha: "Total running VMs: N"; as demais são caminhos de .vmx.
+    @($out | Select-Object -Skip 1 | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+}
+
+function Test-VmRunning([hashtable]$Settings, [string]$Vmx) {
+    $full = [System.IO.Path]::GetFullPath($Vmx)
+    foreach ($r in Get-RunningVmx $Settings) {
+        if ([string]::Equals([System.IO.Path]::GetFullPath($r), $full, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+# ------------------------------------------------------------------ SSH ---
+# known_hosts próprio do lab: as chaves de host mudam a cada `up` (o
+# finalize.sh apaga as da golden), então ele é descartado no `down`.
+function Get-LabSshArgs {
+    $paths = Get-LabPaths
+    $known = Join-Path $paths.Work 'known_hosts'
+    @(
+        '-i', $paths.StudentKey,
+        '-o', 'BatchMode=yes',
+        '-o', 'StrictHostKeyChecking=accept-new',
+        '-o', "UserKnownHostsFile=$known",
+        '-o', 'ConnectTimeout=5',
+        '-o', 'LogLevel=ERROR'
+    )
+}
+
+function Test-TcpPort([string]$Ip, [int]$Port, [int]$TimeoutMs = 2000) {
+    $c = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $task = $c.ConnectAsync($Ip, $Port)
+        return ($task.Wait($TimeoutMs) -and $c.Connected)
+    } catch { return $false } finally { $c.Dispose() }
+}
+
+function Invoke-LabSsh([string]$Ip, [string]$RemoteCommand, [string]$User = 'student') {
+    $sshArgs = Get-LabSshArgs
+    $out = & ssh.exe @sshArgs "$User@$Ip" $RemoteCommand 2>&1
+    [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = @($out) }
+}
+
+function Wait-LabSsh([string]$Name, [string]$Ip, [int]$TimeoutSec = 300) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-TcpPort $Ip 22) {
+            $r = Invoke-LabSsh $Ip 'true'
+            if ($r.ExitCode -eq 0) { return }
+        }
+        Start-Sleep -Seconds 3
+    }
+    throw "$Name ($Ip) não respondeu SSH em $TimeoutSec s. Abra o console da VM no VMware para ver o que aconteceu."
 }

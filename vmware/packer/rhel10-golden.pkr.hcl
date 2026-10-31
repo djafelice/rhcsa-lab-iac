@@ -78,6 +78,13 @@ source "vmware-iso" "rhel10" {
     # Disco primeiro: no reboot pós-instalação a VM não volta ao instalador.
     # Com o disco ainda vazio (1o boot), cai para o CD normalmente.
     "bios.bootOrder" = "hdd,cdrom"
+
+    # Placa na VMnet configurada. Visto na prática (plugin vmware 2.1.6 +
+    # Workstation 26H1): só com network = "VMnet1" o .vmx saiu como
+    # connectionType "bridged" e vnet "", e a VM ficou sem IP. Estas duas
+    # chaves sobrescrevem o que o plugin gerar.
+    "ethernet0.connectionType" = "custom"
+    "ethernet0.vnet"           = var.network
   }
 
   http_directory = var.http_dir
