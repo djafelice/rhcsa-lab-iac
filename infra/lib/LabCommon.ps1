@@ -28,7 +28,6 @@ function Get-LabPaths {
         StudentKey = Join-Path $script:WorkDir 'student_key'
         KnownHosts = Join-Path $script:WorkDir 'known_hosts'
         Settings   = Join-Path $script:InfraDir 'settings.psd1'
-        IpMap      = Join-Path $script:InfraDir 'ip-map.yaml'
         Machines   = Join-Path $script:RepoRoot 'machines.yaml'
         Kickstart  = Join-Path $script:RepoRoot 'kickstart/ks.cfg.tpl'
         Finalize   = Join-Path $script:RepoRoot 'image/finalize.sh'
@@ -54,13 +53,14 @@ function New-CheckItem([string]$Level, [string]$Message) {
 }
 
 # ------------------------------------------------------------ configuração ---
-# Providers: seção específica em settings.psd1, sistemas de host já
-# implementados (Hosts) e planejados (Planned). Linux + KVM não está aqui:
-# é o backend original do projeto (make deploy, Terraform + libvirt).
+# Providers: seção específica em settings.psd1, hosts suportados e hosts em
+# que o provider já foi testado de ponta a ponta (o `check` avisa nos demais).
+# Linux + KVM não está aqui: é o backend original do projeto (make deploy,
+# Terraform + libvirt), testado pelo autor.
 $script:Providers = [ordered]@{
-    vmware     = @{ Section = 'VMware';     Hosts = @('Windows'); Planned = @('Linux'); Label = 'VMware Workstation' }
-    hyperv     = @{ Section = 'HyperV';     Hosts = @('Windows'); Planned = @();        Label = 'Hyper-V' }
-    virtualbox = @{ Section = 'VirtualBox'; Hosts = @('Windows'); Planned = @('Linux'); Label = 'VirtualBox' }
+    vmware     = @{ Section = 'VMware';     Hosts = @('Windows', 'Linux'); Tested = @('Windows'); Label = 'VMware Workstation' }
+    hyperv     = @{ Section = 'HyperV';     Hosts = @('Windows');          Tested = @();          Label = 'Hyper-V' }
+    virtualbox = @{ Section = 'VirtualBox'; Hosts = @('Windows', 'Linux'); Tested = @();          Label = 'VirtualBox' }
 }
 
 function Get-HostOs {
@@ -75,10 +75,21 @@ function Assert-ProviderHost([string]$Provider) {
     if ($hostOs -eq 'macOS') { throw 'Host macOS não é suportado pelo projeto (hosts físicos suportados: Linux e Windows).' }
     $p = $script:Providers[$Provider]
     if ($p.Hosts -contains $hostOs) { return }
-    if ($p.Planned -contains $hostOs) { throw "Provider '$Provider' em $hostOs ainda está em desenvolvimento." }
-    $ok = @($script:Providers.Keys | Where-Object { $script:Providers[$_].Hosts -contains $hostOs })
+    $ok = @($script:Providers.Keys | Where-Object { $script:Providers[$_].Hosts -contains $hostOs }) -join ', '
     $hint = if ($hostOs -eq 'Linux') { ' Com KVM, use o backend original: make deploy (docs/how-to/deploy-linux.md).' } else { '' }
-    throw "Provider '$Provider' não roda em $hostOs. Neste host: $($(if ($ok) { $ok -join ', ' } else { 'nenhum provider nativo ainda' })).$hint"
+    throw "Provider '$Provider' não roda em $hostOs. Neste host: $ok.$hint"
+}
+
+function Test-ProviderTested([string]$Provider) {
+    $script:Providers[$Provider].Tested -contains (Get-HostOs)
+}
+
+# Privilégio de administrador (Windows) ou root (Linux) da sessão atual.
+function Test-Elevated {
+    if ($IsWindows) {
+        return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    return ((& id -u) -eq '0')
 }
 
 function Get-LabSettings {
@@ -95,6 +106,7 @@ function Get-LabSettings {
         throw "Provider '$($s.Provider)' desconhecido. Use: $($script:Providers.Keys -join ', ')."
     }
     Assert-ProviderHost $s.Provider
+    $script:LabProvider = $s.Provider
     if ($s.StudentPassword -eq 'troque-esta-senha' -or [string]::IsNullOrWhiteSpace($s.StudentPassword)) {
         throw 'Defina StudentPassword em infra/settings.psd1 (não use o valor de exemplo).'
     }
@@ -113,8 +125,10 @@ function Get-LabSettings {
     $section = $script:Providers[$s.Provider].Section
     $s.P = if ($s.ContainsKey($section)) { $s[$section] } else { @{} }
 
-    $s.GoldenDir = Join-Path $s.VmRoot 'golden'
-    $s.LabDir    = Join-Path $s.VmRoot 'lab'
+    # Uma golden e um lab por provider: trocar de hypervisor não apaga nem
+    # mistura os arquivos do outro (as VMs têm os mesmos nomes).
+    $s.GoldenDir = Join-Path (Join-Path $s.VmRoot 'golden') $s.Provider
+    $s.LabDir    = Join-Path (Join-Path $s.VmRoot 'lab') $s.Provider
     return $s
 }
 
@@ -159,19 +173,27 @@ function Import-LabYaml {
 }
 
 # ----------------------------------------------------- tradução de IPs ---
-# infra/ip-map.yaml é OPCIONAL e local (não versionado). Sem ele, o lab usa
-# a rede original 192.168.56.0/24 sem tradução (caso de Hyper-V e
-# VirtualBox, que criam uma rede dedicada). Com ele, todo 192.168.56.X do
-# projeto é trocado pelo endereço da tabela (caso de uma rede NAT do VMware
-# já usada por outras VMs). Ver infra/ip-map.example.yaml.
+# infra/ip-map.<provider>.yaml é OPCIONAL e local (não versionado), um por
+# provider: trocar de hypervisor não arrasta a tradução de outro. Sem ele, o
+# lab usa a rede original 192.168.56.0/24 (caso de Hyper-V e VirtualBox, que
+# criam uma rede dedicada). Com ele, todo 192.168.56.X do projeto vira o
+# endereço da tabela (ex.: rede NAT do VMware já usada por outras VMs).
+# Ver infra/ip-map.example.yaml.
+$script:LabProvider = $null
+
+function Get-IpMapPath {
+    if (-not $script:LabProvider) { return $null }
+    Join-Path $script:InfraDir "ip-map.$($script:LabProvider).yaml"
+}
+
 function Get-IpMap {
-    $paths = Get-LabPaths
-    if (-not (Test-Path $paths.IpMap)) {
+    $path = Get-IpMapPath
+    if (-not $path -or -not (Test-Path $path)) {
         return [pscustomobject]@{ Identity = $true; FromPrefix = '192.168.56'; ToPrefix = '192.168.56'
                                   FromCidr = '192.168.56.0/24'; ToCidr = '192.168.56.0/24'; Map = @{} }
     }
     Import-LabYaml
-    $raw = ConvertFrom-Yaml (Get-Content $paths.IpMap -Raw)
+    $raw = ConvertFrom-Yaml (Get-Content $path -Raw)
     $fromNet = ($raw.network.from -split '/')[0]
     $toNet   = ($raw.network.to -split '/')[0]
     $fromPrefix = $fromNet.Substring(0, $fromNet.LastIndexOf('.'))
@@ -204,7 +226,7 @@ function Convert-LabText {
             return $m.Value
         })
     if ($unmapped.Count -gt 0) {
-        throw "Endereços sem tradução em infra/ip-map.yaml ($Source): $($unmapped -join ', ')"
+        throw "Endereços sem tradução em infra/ip-map.$($script:LabProvider).yaml ($Source): $($unmapped -join ', ')"
     }
     return $result
 }
@@ -252,7 +274,8 @@ function Get-PasswordHash([string]$Password) {
 # Renderiza kickstart/ks.cfg.tpl (o MESMO do backend Linux) com as
 # adaptações dos backends nativos. Falha alto se o template do upstream
 # mudar a ponto de a adaptação não se aplicar.
-function New-LabKickstart([hashtable]$Settings, [string]$StudentUser, [string[]]$ExtraPackages = @()) {
+function New-LabKickstart([hashtable]$Settings, $Machines, [string[]]$ExtraPackages = @()) {
+    $StudentUser = [string]$Machines.student.username
     $paths = Get-LabPaths
     $tpl = (Get-Content $paths.Kickstart -Raw) -replace "`r`n", "`n"
     $pub = (Get-Content "$($paths.StudentKey).pub" -Raw).Trim()
@@ -275,6 +298,9 @@ function New-LabKickstart([hashtable]$Settings, [string]$StudentUser, [string[]]
         if (-not $re.IsMatch($ks)) { throw "Adaptação falhou: '@^minimal-environment' não encontrado no %packages." }
         $ks = $re.Replace($ks, "@^minimal-environment`n# rhcsa-lab-iac (backend nativo): integração com o hypervisor.`n$($ExtraPackages -join "`n")", 1)
     }
+
+    # Ajustes do provider (ex.: Hyper-V sem DHCP: IP fixo na instalação).
+    $ks = Edit-ProviderKickstart $Settings $Machines $ks
 
     if ($ks -match '\$\{[A-Z_]+\}') { throw "Ainda há placeholders sem valor no kickstart: $($Matches[0])" }
     New-Item -ItemType Directory -Force -Path $paths.Http | Out-Null

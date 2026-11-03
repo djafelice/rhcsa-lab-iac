@@ -16,4 +16,6 @@ terraform/crash.log
 # infra/ (VMware, VirtualBox, Hyper-V): configuração local (senhas, rede) e artefatos gerados.
 infra/settings.psd1
 infra/ip-map.yaml
+infra/ip-map.*.yaml
+!infra/ip-map.example.yaml
 infra/.work/

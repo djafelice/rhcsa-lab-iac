@@ -120,7 +120,10 @@ function Invoke-Check {
     $s = $script:Settings
     if (-not $s) { Fail $script:SettingsError }
     else {
-        Write-Ok "provider: $($s.Provider) ($script:ProviderLabel)"
+        Write-Ok "provider: $($s.Provider) ($script:ProviderLabel) em $(Get-HostOs)"
+        if (-not (Test-ProviderTested $s.Provider)) {
+            Write-Warn "provider '$($s.Provider)' ainda NÃO testado em $(Get-HostOs): funciona em teoria; relate o resultado"
+        }
         if (Test-Path -LiteralPath $s.IsoPath -PathType Leaf) { Write-Ok "ISO ($($s.IsoPath))" } else { Fail "ISO não encontrada: $($s.IsoPath)" }
         if ($s.IsoChecksum -eq 'none') { Write-Warn 'IsoChecksum = none (integridade da ISO não verificada)' }
         if ([string]::IsNullOrWhiteSpace($s.RhsmOrgId) -or [string]::IsNullOrWhiteSpace($s.RhsmActivationKey)) {
@@ -132,7 +135,9 @@ function Invoke-Check {
     Write-Step 'Rede do lab e tradução de IPs'
     try {
         $ipMap = Get-IpMap
-        if ($ipMap.Identity) { Write-Ok 'sem infra/ip-map.yaml: rede original 192.168.56.0/24, sem tradução' }
+        $mapName = if (Get-IpMapPath) { Split-Path -Leaf (Get-IpMapPath) } else { 'ip-map.<provider>.yaml' }
+        if (Test-Path (Join-Path $paths.Infra 'ip-map.yaml')) { Fail "infra/ip-map.yaml não é mais lido: renomeie para infra/$mapName" }
+        if ($ipMap.Identity) { Write-Ok "sem infra/${mapName}: rede original 192.168.56.0/24, sem tradução" }
         else {
             Write-Ok "$($ipMap.FromCidr) -> $($ipMap.ToCidr), $($ipMap.Map.Count) endereços"
             $touched = 0
@@ -187,7 +192,7 @@ function Invoke-Image {
 
     Initialize-StudentKey | Out-Null
     Write-Step 'Renderizando o kickstart (kickstart/ks.cfg.tpl + adaptações do backend nativo)'
-    Write-Ok (New-LabKickstart -Settings $s -StudentUser $m.student.username -ExtraPackages (Get-ProviderKickstartPackages))
+    Write-Ok (New-LabKickstart -Settings $s -Machines $m -ExtraPackages (Get-ProviderKickstartPackages))
     Build-ProviderGolden $s $m
     Write-Host ''
     Write-Host 'Imagem golden pronta. Não ligue esta VM: ela é só a base dos clones.' -ForegroundColor Green

@@ -6,11 +6,11 @@ exercícios, comando `lab`, dashboard e simulados do backend Linux (KVM).
 | Host físico | Hypervisor | Como sobe | Estado |
 |---|---|---|---|
 | Linux | KVM/libvirt (nativo) | backend original: `make deploy` (Terraform + Ansible) | testado pelo autor |
-| Linux | VMware Workstation | `infra/`, `Provider = 'vmware'` | planejado |
-| Linux | VirtualBox | `infra/`, `Provider = 'virtualbox'` | planejado |
-| Windows | Hyper-V (nativo) | `infra/`, `Provider = 'hyperv'` | em desenvolvimento |
+| Linux | VMware Workstation | `infra/`, `Provider = 'vmware'` | não testado |
+| Linux | VirtualBox | `infra/`, `Provider = 'virtualbox'` | não testado |
+| Windows | Hyper-V (nativo) | `infra/`, `Provider = 'hyperv'` | não testado |
 | Windows | VMware Workstation | `infra/`, `Provider = 'vmware'` | testado (Windows 11 Pro, Workstation 26H1) |
-| Windows | VirtualBox | `infra/`, `Provider = 'virtualbox'` | planejado |
+| Windows | VirtualBox | `infra/`, `Provider = 'virtualbox'` | não testado |
 
 Alternativa do autor para Windows, mantida: uma VM Linux com
 virtualização aninhada rodando o backend original

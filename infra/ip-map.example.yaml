@@ -1,4 +1,5 @@
-# Tradução de endereços (OPCIONAL). Copie para infra/ip-map.yaml só se o lab
+# Tradução de endereços (OPCIONAL), uma por provider: copie para
+# infra/ip-map.<provider>.yaml (ex.: ip-map.vmware.yaml) só se o lab
 # precisar usar uma rede diferente da original 192.168.56.0/24 -- por
 # exemplo, uma rede NAT do VMware já usada por outras VMs (o VMware no
 # Windows permite uma única rede NAT).

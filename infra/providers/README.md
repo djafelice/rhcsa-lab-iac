@@ -16,8 +16,10 @@ traduzido. VMs são identificadas pelo nome em `machines.yaml`
 |---|---|
 | `$script:ProviderLabel` | Nome legível do hypervisor |
 | `Test-ProviderEnvironment $S $M` | Itens do `check` (`New-CheckItem ok/warn/fail`) |
-| `Initialize-ProviderHost $S $M` | Configuração única do host (rede, DHCP, firewall); roda elevado |
+| `Test-ProviderHostNeedsElevation` | `$true` se o `setup-host.ps1` precisa de administrador/root |
+| `Initialize-ProviderHost $S $M` | Configuração única do host (rede, DHCP, firewall) |
 | `Get-ProviderKickstartPackages` | Pacotes de integração acrescentados ao kickstart |
+| `Edit-ProviderKickstart $S $M $Ks` | Ajustes finais no kickstart renderizado (ex.: IP fixo na instalação sem DHCP); devolve o texto |
 | `Build-ProviderGolden $S $M` | Constrói a golden (Packer) e a deixa pronta para clones |
 | `Test-ProviderGolden $S $M` / `Get-ProviderGoldenLabel` | Golden pronta? / onde está |
 | `New-ProviderVm $S $M $Name $Spec $IsController` | Clone + CPU/RAM, NICs com os MACs de `machines.yaml`, discos extra na ordem, ISO no CD da controladora |
@@ -36,8 +38,9 @@ Regras que todo provider precisa garantir, porque os exercícios dependem
 delas:
 
 - **MACs fixos** de `machines.yaml` (o role `common` renomeia as NICs para
-  `ens18`/`ens19` pelo MAC) e o IP de gerência de cada VM entregue por DHCP
-  no primeiro boot (reserva por MAC) ou equivalente.
+  `ens18`/`ens19` pelo MAC) e o IP de gerência de cada VM já no primeiro
+  boot: reserva DHCP por MAC (vmware, virtualbox) ou perfil NM por MAC
+  embutido na golden (hyperv, cujo switch interno não tem DHCP).
 - **Discos extra brutos com o tamanho exato** em GiB (os exercícios acham
   os discos por tamanho em bytes).
 - **Firmware BIOS** (o kickstart cria partição `biosboot`).

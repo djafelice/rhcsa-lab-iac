@@ -2,28 +2,32 @@
 <#
 .SYNOPSIS
     Configuração única do host para o provider escolhido em
-    infra/settings.psd1. Rode como ADMINISTRADOR (Windows) ou com sudo
-    (Linux), quando o provider exigir.
+    infra/settings.psd1 (rede do lab, DHCP, firewall...).
 
 .DESCRIPTION
-    O que é feito depende do provider (ver providers/<provider>.ps1,
-    função Initialize-ProviderHost). Idempotente: pode rodar de novo
-    sempre que mudar machines.yaml, ip-map.yaml ou a rede do hypervisor.
+    O que é feito depende do provider (providers/<provider>.ps1, função
+    Initialize-ProviderHost). Alguns exigem privilégio:
+      Windows: sudo pwsh -NoProfile -File infra/setup-host.ps1
+      Linux:   sudo pwsh -NoProfile -File infra/setup-host.ps1
+    Idempotente: rode de novo sempre que mudar machines.yaml, o ip-map do
+    provider ou a rede do hypervisor.
 #>
 [CmdletBinding()]
 param()
 
 . "$PSScriptRoot/lib/LabCommon.ps1"
 
-if ($IsWindows) {
-    $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    if (-not $admin) { throw 'Rode este script como administrador (ex.: sudo pwsh -File infra/setup-host.ps1).' }
-}
-
 $s = Get-LabSettings
 . (Get-ProviderScript $s)
 $m = Get-LabMachines
-Write-Host "Provider: $script:ProviderLabel" -ForegroundColor Cyan
+Write-Host "Provider: $script:ProviderLabel ($(Get-HostOs))" -ForegroundColor Cyan
+
+if ((Test-ProviderHostNeedsElevation) -and -not (Test-Elevated)) {
+    throw 'Este provider precisa de privilégio para configurar o host: sudo pwsh -NoProfile -File infra/setup-host.ps1'
+}
+if (-not (Test-ProviderTested $s.Provider)) {
+    Write-Warn "o provider '$($s.Provider)' ainda não foi testado em $(Get-HostOs); relate o resultado (ver docs)."
+}
 Initialize-ProviderHost $s $m
 Write-Host ''
 Write-Host 'Host configurado. Confira com: ./infra/lab.ps1 check' -ForegroundColor Green

@@ -1,30 +1,38 @@
-# Provider: VMware Workstation (Windows).
-# Implementa o contrato de providers/README.md com vmrun.exe,
-# vmware-vdiskmanager.exe, edição de .vmx e Packer (vmware-iso).
+# Provider: VMware Workstation (Windows e Linux).
+# Implementa o contrato de providers/README.md com vmrun,
+# vmware-vdiskmanager, edição de .vmx e Packer (vmware-iso).
+#
+# Testado: Windows 11 Pro + Workstation 26H1. Linux: não testado.
 #
 # settings.psd1:
 #   VMware = @{
-#       InstallDir = 'C:\Program Files\VMware\VMware Workstation'
-#       VmNet      = 'VMnet1'      # rede NAT do VMware usada pelo lab
+#       InstallDir = 'C:\Program Files\VMware\VMware Workstation'   # Linux: '/usr/bin'
+#       VmNet      = 'VMnet1'      # rede NAT do VMware usada pelo lab (Linux: 'vmnet8', ...)
 #   }
+#
+# O IP de cada VM vem de reservas DHCP por MAC no serviço DHCP do VMware:
+#   Windows: %ProgramData%\VMware\vmnetdhcp.conf
+#   Linux:   /etc/vmware/<vmnet>/dhcpd/dhcpd.conf
 
 $script:ProviderLabel = 'VMware Workstation'
 
 function Get-VmwareSettings([hashtable]$Settings) {
     $p = $Settings.P
-    $installDir = if ($p.ContainsKey('InstallDir')) { $p.InstallDir } else { 'C:\Program Files\VMware\VMware Workstation' }
+    $default = if ($IsWindows) { 'C:\Program Files\VMware\VMware Workstation' } else { '/usr/bin' }
+    $installDir = if ($p.ContainsKey('InstallDir')) { $p.InstallDir } else { $default }
     if (-not $p.ContainsKey('VmNet')) { throw "Defina VMware = @{ VmNet = 'VMnetX' } em infra/settings.psd1." }
     [pscustomobject]@{ InstallDir = $installDir; VmNet = $p.VmNet }
 }
 
 function Get-VmwareTool([hashtable]$Settings, [string]$Name) {
+    if ($IsWindows) { $Name = "$Name.exe" }
     $p = Join-Path (Get-VmwareSettings $Settings).InstallDir $Name
     if (-not (Test-Path $p)) { throw "Não encontrei $Name em $((Get-VmwareSettings $Settings).InstallDir) (ajuste VMware.InstallDir)." }
     return $p
 }
 
 function Invoke-Vmrun([hashtable]$Settings, [string[]]$Arguments, [switch]$AllowFailure) {
-    $vmrun = Get-VmwareTool $Settings 'vmrun.exe'
+    $vmrun = Get-VmwareTool $Settings 'vmrun'
     $out = & $vmrun -T ws @Arguments 2>&1
     if ($LASTEXITCODE -ne 0 -and -not $AllowFailure) { throw "vmrun $($Arguments -join ' ') falhou: $out" }
     return $out
@@ -81,7 +89,8 @@ function Test-VmwareRunning([hashtable]$Settings, [string]$Vmx) {
     $full = [System.IO.Path]::GetFullPath($Vmx)
     $out = Invoke-Vmrun $Settings @('list') -AllowFailure
     foreach ($r in @($out | Select-Object -Skip 1 | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })) {
-        if ([string]::Equals([System.IO.Path]::GetFullPath($r), $full, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+        $cmp = if ($IsWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+        if ([string]::Equals([System.IO.Path]::GetFullPath($r), $full, $cmp)) { return $true }
     }
     return $false
 }
@@ -93,73 +102,98 @@ function Test-VmwareSnapshot([hashtable]$Settings, [string]$Vmx, [string]$Snapsh
 
 # ================================================================ CONTRATO ===
 
+# Arquivo do serviço DHCP do VMware onde ficam as reservas do lab.
+function Get-VmwareDhcpConf([hashtable]$Settings) {
+    if ($IsWindows) { return (Join-Path $env:ProgramData 'VMware\vmnetdhcp.conf') }
+    $vmnet = (Get-VmwareSettings $Settings).VmNet.ToLower()
+    return "/etc/vmware/$vmnet/dhcpd/dhcpd.conf"
+}
+
+function Test-HostHasIp([string]$Ip) {
+    if ($IsWindows) { return [bool](Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object IPAddress -eq $Ip) }
+    return [bool]((& ip -4 -o addr show 2>$null) -match "inet $([regex]::Escape($Ip))/")
+}
+
+function Test-ProviderHostNeedsElevation { $true }
+
 function Test-ProviderEnvironment([hashtable]$Settings, $Machines) {
     $items = @()
-    foreach ($t in 'vmrun.exe', 'vmware-vdiskmanager.exe') {
+    foreach ($t in 'vmrun', 'vmware-vdiskmanager') {
         try { $items += New-CheckItem 'ok' "$t ($(Get-VmwareTool $Settings $t))" } catch { $items += New-CheckItem 'fail' $_.Exception.Message }
     }
-    try {
-        $vs = Get-VmwareSettings $Settings
-        $items += New-CheckItem 'ok' "rede do lab: $($vs.VmNet)"
-    } catch { $items += New-CheckItem 'fail' $_.Exception.Message }
+    try { $items += New-CheckItem 'ok' "rede do lab: $((Get-VmwareSettings $Settings).VmNet)" } catch { $items += New-CheckItem 'fail' $_.Exception.Message }
 
-    $hostIp = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object IPAddress -eq $Settings.HostIp
-    if ($hostIp) { $items += New-CheckItem 'ok' "IP do Windows $($Settings.HostIp) em '$($hostIp.InterfaceAlias)'" }
-    else { $items += New-CheckItem 'fail' "nenhum adaptador do Windows tem o IP $($Settings.HostIp) (confira HostIp)" }
+    if (Test-HostHasIp $Settings.HostIp) { $items += New-CheckItem 'ok' "o host tem o IP $($Settings.HostIp) (HostIp)" }
+    else { $items += New-CheckItem 'fail' "nenhuma interface do host tem o IP $($Settings.HostIp) (confira HostIp e a VMnet do lab)" }
 
-    if (Get-NetFirewallRule -DisplayName 'rhcsa-lab-iac: Packer HTTP' -ErrorAction SilentlyContinue) {
-        $items += New-CheckItem 'ok' "regra de firewall para a porta $($Settings.PackerHttpPort)"
-    } else { $items += New-CheckItem 'fail' 'regra de firewall do Packer ausente (rode infra/setup-host.ps1 como administrador)' }
+    if ($IsWindows) {
+        if (Get-NetFirewallRule -DisplayName 'rhcsa-lab-iac: Packer HTTP' -ErrorAction SilentlyContinue) {
+            $items += New-CheckItem 'ok' "regra de firewall para a porta $($Settings.PackerHttpPort)"
+        } else { $items += New-CheckItem 'fail' 'regra de firewall do Packer ausente (rode infra/setup-host.ps1 elevado)' }
+    }
 
-    $dhcpConf = Join-Path $env:ProgramData 'VMware\vmnetdhcp.conf'
+    $dhcpConf = Get-VmwareDhcpConf $Settings
     if ((Test-Path $dhcpConf) -and (Select-String -Path $dhcpConf -Pattern '# BEGIN rhcsa-lab-iac' -Quiet)) {
-        $items += New-CheckItem 'ok' 'reservas DHCP do lab no vmnetdhcp.conf'
-    } else { $items += New-CheckItem 'fail' 'reservas DHCP do lab ausentes (rode infra/setup-host.ps1 como administrador)' }
+        $items += New-CheckItem 'ok' "reservas DHCP do lab em $dhcpConf"
+    } else { $items += New-CheckItem 'fail' "reservas DHCP do lab ausentes em $dhcpConf (rode infra/setup-host.ps1 elevado)" }
     return $items
 }
 
-# Configuração única do host (administrador): firewall do Packer e reservas
-# DHCP dos MACs de machines.yaml no serviço DHCP do VMware.
+# Configuração única do host (elevado): reservas DHCP dos MACs de
+# machines.yaml no DHCP do VMware e liberação da porta HTTP do Packer.
 function Initialize-ProviderHost([hashtable]$Settings, $Machines) {
     $ipMap = Get-IpMap
-    Write-Step "Firewall: porta TCP $($Settings.PackerHttpPort) (Packer HTTP) a partir de $($ipMap.ToCidr)"
-    $ruleName = 'rhcsa-lab-iac: Packer HTTP'
-    Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-    New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow -Protocol TCP `
-        -LocalPort $Settings.PackerHttpPort -RemoteAddress $ipMap.ToCidr -Profile Any | Out-Null
-    Write-Ok $ruleName
+    $cidr = $ipMap.ToCidr
+    Write-Step "Firewall: porta TCP $($Settings.PackerHttpPort) (Packer HTTP) a partir de $cidr"
+    if ($IsWindows) {
+        $ruleName = 'rhcsa-lab-iac: Packer HTTP'
+        Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+        New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow -Protocol TCP `
+            -LocalPort $Settings.PackerHttpPort -RemoteAddress $cidr -Profile Any | Out-Null
+        Write-Ok $ruleName
+    } elseif ((Get-Command firewall-cmd -ErrorAction SilentlyContinue) -and ((& firewall-cmd --state 2>$null) -eq 'running')) {
+        & firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=$cidr port port=$($Settings.PackerHttpPort) protocol=tcp accept" | Out-Null
+        & firewall-cmd --reload | Out-Null
+        Write-Ok 'firewalld: regra permanente criada'
+    } elseif ((Get-Command ufw -ErrorAction SilentlyContinue) -and ((& ufw status 2>$null) -match 'Status: active')) {
+        & ufw allow from $cidr to any port $Settings.PackerHttpPort proto tcp | Out-Null
+        Write-Ok 'ufw: regra criada'
+    } else { Write-Ok 'nenhum firewall ativo detectado (firewalld/ufw)' }
 
-    $dhcpConf = Join-Path $env:ProgramData 'VMware\vmnetdhcp.conf'
-    if (-not (Test-Path $dhcpConf)) { throw "Não encontrei $dhcpConf. O serviço DHCP do VMware está instalado?" }
+    $dhcpConf = Get-VmwareDhcpConf $Settings
+    if (-not (Test-Path $dhcpConf)) { throw "Não encontrei $dhcpConf. A VMnet do lab existe e tem DHCP ligado no Virtual Network Editor?" }
     Write-Step "Reservas DHCP em $dhcpConf"
     $backup = "$dhcpConf.bak-rhcsa-lab-iac"
     if (-not (Test-Path $backup)) { Copy-Item $dhcpConf $backup; Write-Ok "backup original em $backup" }
-
-    $block = [System.Text.StringBuilder]::new()
-    [void]$block.AppendLine('# BEGIN rhcsa-lab-iac (gerado por infra/setup-host.ps1; não edite à mão)')
+    $nl = if ($IsWindows) { "`r`n" } else { "`n" }
+    $lines = @('# BEGIN rhcsa-lab-iac (gerado por infra/setup-host.ps1; não edite à mão)')
     foreach ($name in $Machines.machines.Keys) {
         $vm = $Machines.machines[$name]
         $mac = ([string]$vm.nics[0].mac).ToUpper()
-        [void]$block.AppendLine("host rhcsa-lab-$name {")
-        [void]$block.AppendLine("    hardware ethernet $mac;")
-        [void]$block.AppendLine("    fixed-address $($vm.ip);")
-        [void]$block.AppendLine('}')
+        $lines += "host rhcsa-lab-$name {", "    hardware ethernet $mac;", "    fixed-address $($vm.ip);", '}'
         Write-Ok ("{0,-12} {1}  ->  {2}" -f $name, $mac, $vm.ip)
     }
-    [void]$block.AppendLine('# END rhcsa-lab-iac')
+    $lines += '# END rhcsa-lab-iac'
     $content = Get-Content $dhcpConf -Raw
-    $content = [regex]::Replace($content, '(?s)\r?\n?# BEGIN rhcsa-lab-iac.*?# END rhcsa-lab-iac\r?\n?', "`r`n")
-    $content = $content.TrimEnd() + "`r`n`r`n" + ($block.ToString() -replace "(?<!`r)`n", "`r`n")
+    $content = [regex]::Replace($content, '(?s)\r?\n?# BEGIN rhcsa-lab-iac.*?# END rhcsa-lab-iac\r?\n?', $nl)
+    $content = $content.TrimEnd() + $nl + $nl + ($lines -join $nl) + $nl
     [System.IO.File]::WriteAllText($dhcpConf, $content, [System.Text.UTF8Encoding]::new($false))
 
     Write-Step 'Reiniciando o serviço DHCP do VMware'
-    if (Get-Service -Name VMnetDHCP -ErrorAction SilentlyContinue) {
-        Restart-Service -Name VMnetDHCP -Force
-        Write-Ok 'VMnetDHCP reiniciado'
-    } else { Write-Warn 'serviço VMnetDHCP não encontrado; reinicie o serviço DHCP do VMware manualmente.' }
+    if ($IsWindows) {
+        if (Get-Service -Name VMnetDHCP -ErrorAction SilentlyContinue) { Restart-Service -Name VMnetDHCP -Force; Write-Ok 'VMnetDHCP reiniciado' }
+        else { Write-Warn 'serviço VMnetDHCP não encontrado; reinicie o DHCP do VMware manualmente.' }
+    } else {
+        & vmware-networks --stop | Out-Null
+        & vmware-networks --start | Out-Null
+        if ($LASTEXITCODE -eq 0) { Write-Ok 'vmware-networks reiniciado' } else { Write-Warn 'falha ao reiniciar com vmware-networks; reinicie a rede do VMware manualmente.' }
+    }
 }
 
 function Get-ProviderKickstartPackages { @('open-vm-tools') }
+
+# O DHCP do VMware (com as reservas) atende a instalação: nada a ajustar.
+function Edit-ProviderKickstart([hashtable]$Settings, $Machines, [string]$Kickstart) { $Kickstart }
 
 function Test-ProviderGolden([hashtable]$Settings, $Machines) {
     $vmx = Get-VmwareGoldenVmx $Settings $Machines
@@ -202,7 +236,7 @@ function New-ProviderVm([hashtable]$Settings, $Machines, [string]$Name, $Spec, [
     New-Item -ItemType Directory -Force -Path $vmDir | Out-Null
     Invoke-Vmrun $Settings @('clone', $golden, $vmx, 'linked', '-snapshot=base', "-cloneName=rhcsa-lab-$Name") | Out-Null
 
-    $vdisk = Get-VmwareTool $Settings 'vmware-vdiskmanager.exe'
+    $vdisk = Get-VmwareTool $Settings 'vmware-vdiskmanager'
     $cfg = Read-Vmx $vmx
     $cfg['displayName']    = "rhcsa-lab-$Name"
     $cfg['memsize']        = [string]$Spec.memory_mb
