@@ -16,13 +16,14 @@ Alternativa do autor para Windows, mantida: uma VM Linux com
 virtualização aninhada rodando o backend original
 (`docs/how-to/deploy-windows.md`).
 
-Uso: `infra/settings.example.psd1` → `infra/settings.psd1`,
-`infra/setup-host.ps1` (administrador, uma vez), `infra/lab.ps1 check`,
-`image`, `up`. Comandos: `infra/lab.ps1 help`.
+Documentação:
 
-Arquitetura: `lib/LabCommon.ps1` (núcleo comum), `lab.ps1` (comandos),
-`providers/<provider>.ps1` (contrato em `providers/README.md`),
-`packer/<provider>/` (golden), `provision/` (roda na workstation).
-
-A documentação completa entra em `docs/` quando todos os providers
-estiverem prontos.
+- [Escolher onde rodar](../docs/how-to/escolher-o-host.md) e o guia de
+  deploy de cada cenário (links na tabela de lá)
+- [Tutorial Windows + VMware](../docs/tutorials/primeiro-lab-windows-vmware.md)
+- [Operar o lab](../docs/how-to/operar-o-lab-infra.md) e
+  [resolver problemas](../docs/how-to/resolver-problemas-infra.md)
+- Referência: [`lab.ps1`](../docs/reference/lab-ps1.md),
+  [configuração](../docs/reference/configuracao-infra.md)
+- [Como funciona](../docs/explanation/infra-hypervisors.md); contrato dos
+  providers em [`providers/README.md`](providers/README.md)

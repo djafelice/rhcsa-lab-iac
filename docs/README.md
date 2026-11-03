@@ -13,15 +13,33 @@ Organizada segundo o [Diátaxis](https://diataxis.fr): cada documento tem um
 ## Tutoriais
 
 - [Do zero ao primeiro exercício resolvido](tutorials/primeiro-lab-fim-a-fim.md)
-  — pré-requisitos, ISO, `.env`, `make deploy`, dashboard e um exercício
-  completo. **Comece por aqui.**
+  — host Linux com KVM: pré-requisitos, ISO, `.env`, `make deploy`,
+  dashboard e um exercício completo. **Comece por aqui** se usa Linux.
+- [Do zero ao primeiro exercício no Windows com VMware Workstation](tutorials/primeiro-lab-windows-vmware.md)
+  — o mesmo, sem virtualização aninhada, pelo `infra/`. **Comece por
+  aqui** se usa Windows.
 
 ## Guias práticos
 
-- [Fazer o deploy num host Linux](how-to/deploy-linux.md) — dependências
-  por distribuição, libvirt, `.env`, `make deploy`.
-- [Fazer o deploy no Windows](how-to/deploy-windows.md) — WSL2 ou VM Linux
-  com virtualização aninhada (Hyper-V testado; WSL2 não).
+- [Escolher onde rodar o lab](how-to/escolher-o-host.md) — Linux ou
+  Windows; KVM, Hyper-V, VMware Workstation ou VirtualBox; o que foi
+  testado.
+- [Fazer o deploy num host Linux](how-to/deploy-linux.md) — KVM:
+  dependências por distribuição, libvirt, `.env`, `make deploy`.
+- Sem virtualização aninhada, pelo `infra/` (primeiro:
+  [preparar o host](how-to/preparar-host-infra.md)):
+  - [Windows + VMware Workstation](how-to/deploy-windows-vmware.md) (testado)
+  - [Windows + Hyper-V](how-to/deploy-windows-hyperv.md) (não testado)
+  - [Windows + VirtualBox](how-to/deploy-windows-virtualbox.md) (não testado)
+  - [Linux + VMware Workstation](how-to/deploy-linux-vmware.md) (não testado)
+  - [Linux + VirtualBox](how-to/deploy-linux-virtualbox.md) (não testado)
+- [Fazer o deploy no Windows com virtualização aninhada](how-to/deploy-windows.md)
+  — alternativa: WSL2 ou VM Linux rodando o backend KVM (Hyper-V testado;
+  WSL2 não).
+- [Operar o lab do `infra/` no dia a dia](how-to/operar-o-lab-infra.md) —
+  `stop`/`start`, `reset` ao snapshot, `down`/`up`, console das VMs.
+- [Resolver problemas do `infra/`](how-to/resolver-problemas-infra.md) —
+  sintoma → o que fazer, com os casos vistos na homologação.
 - [Operar o lab no dia a dia](how-to/operar-o-lab.md) — SSH, reaplicar o
   Ansible, mudar a topologia, reconstruir a imagem, destruir e recriar.
 - [Testar sem subscription (modo offline)](how-to/deploy-offline.md)
@@ -36,6 +54,10 @@ Organizada segundo o [Diátaxis](https://diataxis.fr): cada documento tem um
 ## Referência
 
 - [Alvos do `Makefile`](reference/makefile.md) e arquivos gerados em `output/`
+- [`infra/lab.ps1` e `infra/setup-host.ps1`](reference/lab-ps1.md) —
+  comandos dos providers, etapas do provisionamento, arquivos gerados
+- [Configuração do `infra/`](reference/configuracao-infra.md) —
+  `settings.psd1`, `ip-map.<provider>.yaml`, rede de cada provider
 - [Configuração](reference/configuracao.md) — `.env`, `machines.yaml`,
   variáveis do Terraform e do Ansible
 - [Comando `lab` e dashboard](reference/comando-lab.md) — subcomandos,
@@ -48,6 +70,10 @@ Organizada segundo o [Diátaxis](https://diataxis.fr): cada documento tem um
 
 - [Arquitetura do lab](explanation/arquitetura.md) — topologia, fluxo de
   deploy, subscription, dispatcher `lab`, por que Terraform + Ansible
+- [Providers do `infra/`](explanation/infra-hypervisors.md) — como o mesmo
+  lab sobe em VMware, VirtualBox e Hyper-V sem virtualização aninhada:
+  núcleo + providers, workstation como controladora, tradução de IPs, rede
+  e snapshots
 - [Imagem golden](explanation/imagem-golden.md) — kickstart, sysprep e
   decisões do build
 - [Problemas conhecidos e mitigações](explanation/problemas-conhecidos.md)

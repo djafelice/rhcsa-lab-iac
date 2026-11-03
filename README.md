@@ -10,12 +10,33 @@ exame dinâmico `examsim-dinamico` (24 questões sorteadas de um pool de 166),
 um mirror de pacotes/flatpak no estilo "classroom" e um dashboard web de
 acompanhamento. Um comando (`make deploy`) faz tudo.
 
+O caminho original roda num **Linux com KVM**. O lab também sobe, **sem
+virtualização aninhada**, num host Windows ou Linux com **Hyper-V, VMware
+Workstation ou VirtualBox**, pela pasta [`infra/`](infra/) — os mesmos
+exercícios, comando `lab`, dashboard e simulados.
+
 **Primeira vez aqui? Siga o [tutorial completo](docs/tutorials/primeiro-lab-fim-a-fim.md)**
 — ele assume zero conhecimento prévio deste repositório e cobre cada passo,
 do zero até resolver o primeiro exercício.
 
 > Aviso de direitos autorais: este projeto **não contém** nenhum conteúdo do
 > material oficial de treinamento da Red Hat. Ver [NOTICE.md](NOTICE.md).
+
+## Onde rodar
+
+| Máquina física | Hypervisor | Como | Status |
+|---|---|---|---|
+| Linux | KVM | `make deploy` (abaixo) | testado |
+| Windows | VMware Workstation | `infra/lab.ps1` | testado |
+| Windows | Hyper-V | `infra/lab.ps1` | não testado |
+| Windows | VirtualBox | `infra/lab.ps1` | não testado |
+| Linux | VMware Workstation | `infra/lab.ps1` | não testado |
+| Linux | VirtualBox | `infra/lab.ps1` | não testado |
+
+Como decidir, requisitos e o guia de cada um:
+[escolher onde rodar](docs/how-to/escolher-o-host.md). No Windows, comece
+pelo [tutorial Windows + VMware](docs/tutorials/primeiro-lab-windows-vmware.md).
+As seções a seguir descrevem o caminho original (Linux + KVM).
 
 ## Pré-requisitos
 
@@ -113,7 +134,10 @@ Lista completa de targets do `Makefile`: `make help`.
   `virt-install` + kickstart (`scripts/build-image.sh`), decisão deliberada para
   reduzir dependências — quem for rodar isto só precisa apontar o caminho de
   uma ISO que já baixou da própria conta Red Hat, sem instalar e aprender
-  mais uma ferramenta de build de imagem.
+  mais uma ferramenta de build de imagem. (Os providers de [`infra/`](infra/)
+  usam Packer, porque fora do libvirt não há um `virt-install`; o
+  kickstart e o sysprep são os mesmos — ver
+  [providers do `infra/`](docs/explanation/infra-hypervisors.md).)
 - **RHEL 10 real**, não uma distribuição derivada, porque o objetivo é
   praticar para um exame que é aplicado sobre RHEL de verdade (registro via
   Red Hat Developer Subscription for Individuals, gratuita). Há uma
@@ -136,10 +160,12 @@ A documentação segue o [Diátaxis](https://diataxis.fr) — índice completo e
 
 | Quero… | Comece por |
 |---|---|
-| montar o lab pela primeira vez | [Tutorial: do zero ao primeiro exercício](docs/tutorials/primeiro-lab-fim-a-fim.md) |
+| escolher onde rodar (Linux/Windows, KVM/Hyper-V/VMware/VirtualBox) | [Escolher o host](docs/how-to/escolher-o-host.md) |
+| montar o lab pela primeira vez | [Tutorial Linux + KVM](docs/tutorials/primeiro-lab-fim-a-fim.md), [Tutorial Windows + VMware](docs/tutorials/primeiro-lab-windows-vmware.md) |
 | fazer uma tarefa específica | [Deploy em Linux](docs/how-to/deploy-linux.md), [Deploy no Windows](docs/how-to/deploy-windows.md), [Revisão por IA](docs/how-to/ativar-revisao-ia.md), [Operar o lab](docs/how-to/operar-o-lab.md), [Modo offline](docs/how-to/deploy-offline.md), [Resolver problemas](docs/how-to/resolver-problemas.md), [Criar um exercício](docs/how-to/criar-exercicio.md) |
-| consultar comandos e valores | [Makefile](docs/reference/makefile.md), [Configuração](docs/reference/configuracao.md), [Comando `lab`](docs/reference/comando-lab.md), [Catálogo](docs/reference/catalogo-exercicios.md) |
-| entender o porquê | [Arquitetura](docs/explanation/arquitetura.md), [Problemas conhecidos](docs/explanation/problemas-conhecidos.md) |
+| usar o `infra/` no dia a dia | [Operar o lab (`infra/`)](docs/how-to/operar-o-lab-infra.md), [Resolver problemas (`infra/`)](docs/how-to/resolver-problemas-infra.md) |
+| consultar comandos e valores | [`infra/lab.ps1`](docs/reference/lab-ps1.md), [Configuração do `infra/`](docs/reference/configuracao-infra.md), [Makefile](docs/reference/makefile.md), [Configuração](docs/reference/configuracao.md), [Comando `lab`](docs/reference/comando-lab.md), [Catálogo](docs/reference/catalogo-exercicios.md) |
+| entender o porquê | [Arquitetura](docs/explanation/arquitetura.md), [Providers do `infra/`](docs/explanation/infra-hypervisors.md), [Problemas conhecidos](docs/explanation/problemas-conhecidos.md) |
 
 ## Direitos autorais
 

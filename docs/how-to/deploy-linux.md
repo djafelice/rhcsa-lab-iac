@@ -4,6 +4,9 @@ Use quando já sabe o que o lab é e só quer subir as 3 VMs num host Linux
 com KVM. Para um passo a passo didático, desde obter a conta Red Hat e a
 ISO, siga o [tutorial](../tutorials/primeiro-lab-fim-a-fim.md).
 
+Prefere VMware Workstation ou VirtualBox no Linux? Ver
+[escolher onde rodar](escolher-o-host.md).
+
 Caminho testado: host Rocky/RHEL 10 (homologação T1–T13). Fedora e
 Ubuntu/Debian usam os mesmos passos com os nomes de pacote abaixo.
 

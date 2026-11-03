@@ -1,5 +1,10 @@
 # Como fazer o deploy do lab no Windows
 
+> **Sem virtualização aninhada:** o lab também roda direto no Hyper-V, no
+> VMware Workstation ou no VirtualBox do Windows, pelo `infra/`. Ver
+> [escolher onde rodar](escolher-o-host.md). Este guia descreve a
+> alternativa com o backend KVM dentro de uma VM Linux.
+
 > **Opção B com Hyper-V: testada** em 2026-10-26 (Windows 11 Pro 26200,
 > i5-13400, VM RHEL 10.2 Gen2 com 6 vCPU/12 GB): `make deploy-offline`
 > terminou com 0 falhas em ~17 min, `lab start/grade/finish` funcionou e o
