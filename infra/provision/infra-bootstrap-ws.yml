@@ -1,5 +1,5 @@
 ---
-# Backend VMware: aplica na workstation SÓ a parte de rede do role common
+# Backends nativos: aplica na workstation SÓ a parte de rede do role common
 # (ansible/roles/common/tasks/network.yml, sem cópia nem alteração), antes do
 # site.yml. Copiado para ansible/ na cópia do repositório enviada à
 # workstation, para herdar ansible/group_vars como o site.yml.
@@ -10,7 +10,7 @@
 # a si mesma). A conferência final do role (ens18 presente) falha por
 # definição antes do reboot; só essa falha é tolerada.
 
-- name: Backend VMware - rede da workstation (controladora) antes do site.yml
+- name: Backend nativo - rede da workstation (controladora) antes do site.yml
   hosts: workstation
   become: true
   gather_facts: true

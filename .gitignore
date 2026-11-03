@@ -13,6 +13,7 @@ terraform/*.tfstate
 terraform/*.tfstate.*
 terraform/crash.log
 
-# Backend VMware (Windows): configuração local com senhas e artefatos gerados.
-vmware/settings.psd1
-vmware/.work/
+# infra/ (VMware, VirtualBox, Hyper-V): configuração local (senhas, rede) e artefatos gerados.
+infra/settings.psd1
+infra/ip-map.yaml
+infra/.work/

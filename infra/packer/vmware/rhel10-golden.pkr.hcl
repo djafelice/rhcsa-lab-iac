@@ -1,12 +1,12 @@
-# Imagem golden "rhel10-rhcsa-base" para o backend VMware Workstation.
+# Imagem golden "rhel10-rhcsa-base" para o provider vmware (VMware Workstation).
 #
 # Equivale a scripts/build-image.sh do backend Linux (virt-install +
 # virt-customize): instala o RHEL 10 desassistido com o MESMO kickstart
-# (kickstart/ks.cfg.tpl, renderizado e adaptado por vmware\lib\LabCommon.ps1)
+# (kickstart/ks.cfg.tpl, renderizado e adaptado por infra/lib/LabCommon.ps1)
 # e roda o MESMO sysprep (image/finalize.sh). A VM resultante fica desligada
 # e serve de base para os clones vinculados das 3 VMs do lab.
 #
-# Não rode o packer direto: use `.\vmware\lab.ps1 image`, que gera a chave,
+# Não rode o packer direto: use `infra/lab.ps1 image` (Provider = vmware), que gera a chave,
 # renderiza o kickstart, preenche estas variáveis e tira o snapshot "base".
 
 packer {

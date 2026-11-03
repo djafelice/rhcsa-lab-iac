@@ -1,0 +1,19 @@
+# Tradução de endereços (OPCIONAL). Copie para infra/ip-map.yaml só se o lab
+# precisar usar uma rede diferente da original 192.168.56.0/24 -- por
+# exemplo, uma rede NAT do VMware já usada por outras VMs (o VMware no
+# Windows permite uma única rede NAT).
+#
+# A tradução é aplicada em memória ao machines.yaml e à cópia do repositório
+# enviada à workstation; os arquivos versionados nunca são alterados.
+# Todo 192.168.56.X do projeto precisa estar listado (o .0 é automático):
+# um endereço novo do upstream sem tradução faz o `check` falhar.
+network:
+  from: 192.168.56.0/24
+  to: 172.16.0.0/24
+
+addresses:
+  192.168.56.1: 172.16.0.1     # gateway e DNS (NAT do hypervisor)
+  192.168.56.10: 172.16.0.10   # workstation
+  192.168.56.20: 172.16.0.11   # servera
+  192.168.56.30: 172.16.0.12   # serverb
+  192.168.56.91: 172.16.0.91   # IP do exercício examsim-network (ens19)

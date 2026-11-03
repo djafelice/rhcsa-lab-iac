@@ -1,10 +1,10 @@
 #!/bin/bash
-# Roda NA WORKSTATION, como root, disparado por `vmware\lab.ps1 provision`
+# Roda NA WORKSTATION, como root, disparado por `infra\lab.ps1 provision`
 # via systemd-run (o playbook sobrevive a uma queda da sessão SSH do Windows).
 #
-# A workstation é a controladora Ansible temporária do backend VMware: o
+# A workstation é a controladora Ansible temporária dos backends nativos: o
 # Windows não roda Ansible, então o lab.ps1 envia para cá a cópia do
-# repositório já traduzida para a rede do VMware (vmware\ip-map.yaml), a
+# repositório (com os IPs traduzidos por infra\ip-map.yaml, se houver), a
 # chave do student e as variáveis da subscription, e chama este script.
 #
 #   run.sh unpack   (rodado de /tmp/rhcsa-provision-upload) instala em
@@ -93,7 +93,7 @@ phase_prepare() {
 
   cd "$REPO"
   log 'Aplicando a rede (ens18) na própria workstation, sem reboot'
-  ansible-playbook -i output/inventory.yml ansible/vmware-bootstrap-ws.yml \
+  ansible-playbook -i output/inventory.yml ansible/infra-bootstrap-ws.yml \
     -e common_net_reboot=false
 
   log 'Regenerando initramfs com os .link (o reboot vem do Windows)'
